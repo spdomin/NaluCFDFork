@@ -37,7 +37,6 @@
 #include "Realms.h"
 #include "ScalarMassBackwardEulerNodeSuppAlg.h"
 #include "ScalarMassBDF2NodeSuppAlg.h"
-#include "ScalarMassElemSuppAlgDep.h"
 #include "Simulation.h"
 #include "SolutionOptions.h"
 #include "SolverAlgorithmDriver.h"
@@ -220,17 +219,7 @@ MassFractionEquationSystem::register_interior_algorithm(
       std::vector<std::string> mapNameVec = isrc->second;
       for (size_t k = 0; k < mapNameVec.size(); ++k ) {
         std::string sourceName = mapNameVec[k];
-        SupplementalAlgorithm *suppAlg = NULL;
-        if (sourceName == "mass_fraction_time_derivative" ) {
-          suppAlg = new ScalarMassElemSuppAlgDep(realm_, currentMassFraction_, false);
-        }
-        else if (sourceName == "lumped_mass_fraction_time_derivative" ) {
-          suppAlg = new ScalarMassElemSuppAlgDep(realm_, currentMassFraction_, true);
-        }
-        else {
-          throw std::runtime_error("MassFractionElemSrcTerms::Error Source term is not supported: " + sourceName);
-        }
-        theAlg->supplementalAlg_.push_back(suppAlg);      
+        throw std::runtime_error("MassFractionElemSrcTerms::Error Source term is not supported: " + sourceName);
       }
     }
   }
@@ -635,6 +624,11 @@ MassFractionEquationSystem::register_overset_bc()
     // Perform fringe updates after all equation system solves (ideally on the post_time_step)
     equationSystems_.postIterAlgDriver_.push_back(theAlgPost);
     theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(massFraction_,1,numMassFraction_)));
+    if (realm_.number_of_states()>2)
+    {
+      auto &&massN = massFraction_->field_of_state(stk::mesh::StateN);
+      theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(&massN,1,numMassFraction_)));
+    }
   }
 }
 

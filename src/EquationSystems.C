@@ -31,6 +31,8 @@
 #include <TurbKineticEnergyEquationSystem.h>
 #include <pmr/RadiativeTransportEquationSystem.h>
 #include <mesh_motion/MeshDisplacementEquationSystem.h>
+#include <VolumeOfFluidEquationSystem.h>
+#include <gas_dynamics/GasDynamicsEquationSystem.h>
 
 #include <vector>
 
@@ -95,8 +97,28 @@ void EquationSystems::load(const YAML::Node & y_node)
       {
         const YAML::Node y_system = y_systems[isystem] ;
         EquationSystem *eqSys = 0;
-	YAML::Node y_eqsys ;
-        if ( expect_map(y_system, "LowMachEOM", true) ) {
+	      YAML::Node y_eqsys ;
+        if ( expect_map(y_system, "VolumeOfFluid", true) ) {
+	        y_eqsys =  expect_map(y_system, "VolumeOfFluid", true);
+          if (root()->debug()) NaluEnv::self().naluOutputP0() << "eqSys = VolumeOfFluid" << std::endl;
+          bool outputClipDiag = false;
+          get_if_present_no_default(y_eqsys, "output_clipping_diagnostic", outputClipDiag);
+          double deltaVofClip = 0.0;
+          get_if_present_no_default(y_eqsys, "clipping_delta", deltaVofClip);
+          // vof smoothing/sharpening; provide defaults...
+          double fourierNumber = 0.25;
+          double cAlpha = 0.05;
+          bool smooth = true;
+          int smoothIter = 5;
+          get_if_present_no_default(y_eqsys, "fourier_number", fourierNumber);
+          get_if_present_no_default(y_eqsys, "compression_constant", cAlpha);
+          get_if_present_no_default(y_eqsys, "activate_smoothing", smooth);
+          get_if_present_no_default(y_eqsys, "smoothing_iterations", smoothIter);
+
+          eqSys = new VolumeOfFluidEquationSystem(*this, outputClipDiag, deltaVofClip, 
+                                                  fourierNumber, cAlpha, smooth, smoothIter);
+        }
+        else if ( expect_map(y_system, "LowMachEOM", true) ) {
 	  y_eqsys =  expect_map(y_system, "LowMachEOM", true);
           if (root()->debug()) NaluEnv::self().naluOutputP0() << "eqSys = LowMachEOM " << std::endl;
           bool elemCont = (realm_.realmUsesEdges_) ? false : true;
@@ -190,13 +212,20 @@ void EquationSystems::load(const YAML::Node & y_node)
             quadratureOrder, activateScattering, activatePmrUpwind, deactivatePmrSucv, externalCoupling);
         }
         else if( expect_map(y_system, "MeshDisplacement", true) ) {
-	  y_eqsys =  expect_map(y_system, "MeshDisplacement", true) ;
+	  y_eqsys =  expect_map(y_system, "MeshDisplacement", true);
           bool activateMass = false;
           bool deformWrtModelCoords = false;
           get_if_present_no_default(y_eqsys, "activate_mass", activateMass);
           get_if_present_no_default(y_eqsys, "deform_wrt_model_coordinates", deformWrtModelCoords);
           if (root()->debug()) NaluEnv::self().naluOutputP0() << "eqSys = MeshDisplacement " << std::endl;
-          eqSys = new MeshDisplacementEquationSystem(*this, activateMass, deformWrtModelCoords);
+          eqSys = new MeshDisplacementEquationSystem(*this);
+        }
+        else if( expect_map(y_system, "GasDynamics", true) ) {
+	  y_eqsys =  expect_map(y_system, "GasDynamics", true);
+          bool debugOutput = false;
+          get_if_present_no_default(y_eqsys, "debug_output", debugOutput);
+          if (root()->debug()) NaluEnv::self().naluOutputP0() << "eqSys = GasDynamics " << std::endl;
+          eqSys = new GasDynamicsEquationSystem(*this, debugOutput);
         }
         else {
           if (!NaluEnv::self().parallel_rank()) {
@@ -598,6 +627,55 @@ EquationSystems::register_overset_bc(
   EquationSystemVector::iterator ii;
   for( ii=equationSystemVector_.begin(); ii!=equationSystemVector_.end(); ++ii )
     (*ii)->register_overset_bc(/*nothing required as of yet*/);
+}
+
+//--------------------------------------------------------------------------
+//-------- register_surface_six_dof_algorithm ------------------------------
+//--------------------------------------------------------------------------
+void
+EquationSystems::register_surface_six_dof_algorithm()
+{
+  stk::mesh::MetaData &meta_data = realm_.meta_data();
+
+  // extract parameters
+  std::map<std::string, MeshMotionInfo *>::const_iterator iter;
+  for ( iter = realm_.solutionOptions_->meshMotionInfoMap_.begin();
+        iter != realm_.solutionOptions_->meshMotionInfoMap_.end(); ++iter) {
+
+    // extract mesh info object
+    MeshMotionInfo *meshInfo = iter->second;
+    stk::mesh::PartVector partVector;
+    size_t nPart = 0;
+    if ( meshInfo->sixDof_ ) {
+      for ( size_t i = 0; i < meshInfo->forceSurface_.size(); ++i ) {
+        stk::mesh::Part *targetPart = meta_data.get_part(meshInfo->forceSurface_[i]);
+        if ( NULL == targetPart ) {
+          NaluEnv::self().naluOutput() << "Can't find specified force surface with name: " 
+            << meshInfo->forceSurface_[i] << std::endl;
+        }
+        else {
+          nPart++;
+          const std::vector<stk::mesh::Part*> & mesh_parts = targetPart->subsets();
+          for ( std::vector<stk::mesh::Part*>::const_iterator ii = mesh_parts.begin();
+              ii != mesh_parts.end(); ++ii ) {
+            stk::mesh::Part * const part = *ii;
+            if ( !(meta_data.side_rank() == part->primary_entity_rank()) ) {
+              NaluEnv::self().naluOutput() << "Forcing surface is not a face: " <<
+                meshInfo->forceSurface_[i] << std::endl;
+            }
+            partVector.push_back(part);
+          }
+        }
+      }
+
+      // call through to equation systems
+      if (nPart>0) {
+        EquationSystemVector::iterator ii;
+        for( ii=equationSystemVector_.begin(); ii!=equationSystemVector_.end(); ++ii )
+          (*ii)->register_surface_six_dof_algorithm(meshInfo, partVector);
+      }
+    }
+  }
 }
 
 //--------------------------------------------------------------------------

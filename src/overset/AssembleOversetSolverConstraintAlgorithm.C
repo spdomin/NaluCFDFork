@@ -46,12 +46,26 @@ AssembleOversetSolverConstraintAlgorithm::AssembleOversetSolverConstraintAlgorit
   Realm &realm,
   stk::mesh::Part *part,
   EquationSystem *eqSystem,
-  stk::mesh::FieldBase *fieldQ)
+  stk::mesh::FieldBase *fieldQ,
+  const bool densityScaling)
   : SolverAlgorithm(realm, part, eqSystem),
-    fieldQ_(fieldQ)
+    fieldQ_(fieldQ),
+    density_(nullptr),
+    dualNodalVolume_(nullptr),
+    scaleFac_(densityScaling ? 1.0 : 0.0 )
 {
   // populate fieldVec
   ghostFieldVec_.push_back(fieldQ_);
+
+  // extract fields (only used for density scaling)
+  stk::mesh::MetaData & meta_data = realm_.meta_data();
+  density_ = meta_data.get_field<ScalarFieldType>(stk::topology::NODE_RANK, "density");
+  dualNodalVolume_ = meta_data.get_field<ScalarFieldType>(stk::topology::NODE_RANK, "dual_nodal_volume");
+  if ( densityScaling ) {
+    ghostFieldVec_.push_back(density_);
+    ghostFieldVec_.push_back(dualNodalVolume_);    
+    NaluEnv::self().naluOutputP0() << "Overset density scaling active " << scaleFac_ << std::endl;
+  }
 }
 
 //--------------------------------------------------------------------------
@@ -72,10 +86,15 @@ AssembleOversetSolverConstraintAlgorithm::execute()
   // first thing to do is to zero out the row (lhs and rhs)
   prepare_constraints();
 
+  // parallel communicate ghosted entities
+  if ( NULL != realm_.oversetManager_->oversetGhosting_ )
+    stk::mesh::communicate_field_data(*(realm_.oversetManager_->oversetGhosting_), ghostFieldVec_);
+
   // extract the rank
   const int theRank = NaluEnv::self().parallel_rank();
 
   stk::mesh::BulkData & bulkData = realm_.bulk_data();
+  const int nDim = realm_.meta_data().spatial_dimension();
 
   // space for LHS/RHS (nodesPerElem+1)*numDof*(nodesPerElem+1)*numDof; (nodesPerElem+1)*numDof
   std::vector<double> lhs;
@@ -91,7 +110,7 @@ AssembleOversetSolverConstraintAlgorithm::execute()
   const int sizeOfDof = eqSystem_->linsys_->numDof();
  
   // size interpolated value
-  std::vector<double> qNp1Orphan(sizeOfDof, 0.0);
+  std::vector<double> qNp1Constraint(sizeOfDof, 0.0);
 
   // Parallel communication of ghosted entities has been already handled in
   // EquationSystems::pre_iter_work
@@ -106,10 +125,10 @@ AssembleOversetSolverConstraintAlgorithm::execute()
 
     // extract element and node mesh object
     stk::mesh::Entity owningElement = infoObject->owningElement_;
-    stk::mesh::Entity orphanNode = infoObject->orphanNode_;
+    stk::mesh::Entity constraintNode = infoObject->constraintNode_;
 
     // extract the owning rank for this node
-    const int nodeRank = bulkData.parallel_owner_rank(orphanNode);
+    const int nodeRank = bulkData.parallel_owner_rank(constraintNode);
     
     // check to see if this node is locally owned by this rank; we only want to process locally owned nodes, not shared
     if ( theRank != nodeRank )
@@ -147,13 +166,17 @@ AssembleOversetSolverConstraintAlgorithm::execute()
     }
     
     // extract nodal value for scalarQ
-    const double *qNp1Nodal = (double *)stk::mesh::field_data(*fieldQ_, orphanNode);
+    const double *qNp1Nodal = (double *)stk::mesh::field_data(*fieldQ_, constraintNode);
     
     stk::mesh::Entity const* elem_node_rels = bulkData.begin_nodes(owningElement);
     const int num_nodes = bulkData.num_nodes(owningElement);
 
+    // assemble element average
+    double elemRho = 0.0;
+    double elemDnv = 0.0;
+
     // now load the elemental values for future interpolation; fill in connected nodes; first connected node is orhpan
-    connected_nodes[0] = orphanNode;
+    connected_nodes[0] = constraintNode;
     for ( int ni = 0; ni < num_nodes; ++ni ) {
       stk::mesh::Entity node = elem_node_rels[ni];
       connected_nodes[ni+1] = node;
@@ -162,31 +185,42 @@ AssembleOversetSolverConstraintAlgorithm::execute()
       for ( int i = 0; i < sizeOfDof; ++i ) {
         elemNodalQ[i*nodesPerElement + ni] = qNp1[i];
       }
+      
+      // density scaling fields
+      const double rho = *stk::mesh::field_data(*density_, node );
+      const double dnv = *stk::mesh::field_data(*dualNodalVolume_, node );
+      elemRho += rho;
+      elemDnv += dnv;
     }
+    elemRho /= num_nodes;
+    elemDnv /= num_nodes;
+
+    // continuity equation may benifit from scaling when using VoF BF
+    const double systemScaling = scaleFac_*std::pow(elemDnv, 1.0/nDim)/elemRho + (1.0 - scaleFac_);
 
     // interpolate dof to elemental ips (assigns qNp1)
     meSCS->interpolatePoint(
       sizeOfDof,
       &(infoObject->isoParCoords_[0]),
       &elemNodalQ[0],
-      &qNp1Orphan[0]);
+      &qNp1Constraint[0]);
     
     // lhs; extract general shape function
     meSCS->general_shape_fcn(1, &(infoObject->isoParCoords_[0]), &ws_general_shape_function[0]);
 
-    // rhs; orphan node is defined to be the zeroth connected node
+    // rhs; constraint node is defined to be the zeroth connected node
     for ( int i = 0; i < sizeOfDof; ++i) {
       const int rowOi = i * npePlusOne * sizeOfDof;
-      const double residual = qNp1Nodal[i] - qNp1Orphan[i];
-      p_rhs[i] = -residual;
+      const double residual = qNp1Nodal[i] - qNp1Constraint[i];
+      p_rhs[i] = -residual*systemScaling;
 
-      // row is zero by design (first connected node is the orphan node); assign it fully
-      p_lhs[rowOi+i] += 1.0;
+      // row is zero by design (first connected node is the constraint node); assign it fully
+      p_lhs[rowOi+i] += 1.0*systemScaling;
 
       for ( int ic = 0; ic < nodesPerElement; ++ic ) {
         const int indexR = i + sizeOfDof*(ic+1);
         const int rOiR = rowOi+indexR;
-        p_lhs[rOiR] -= ws_general_shape_function[ic];
+        p_lhs[rOiR] -= ws_general_shape_function[ic]*systemScaling;
       }
     }
 

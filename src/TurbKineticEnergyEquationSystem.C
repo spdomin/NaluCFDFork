@@ -48,7 +48,6 @@
 #include "TurbKineticEnergyKsgsNodeSourceSuppAlg.h"
 #include "TurbKineticEnergySSTNodeSourceSuppAlg.h"
 #include "TurbKineticEnergySSTDESNodeSourceSuppAlg.h"
-#include "TurbKineticEnergyKsgsBuoyantElemSuppAlg.h"
 #include "TurbKineticEnergyRodiNodeSourceSuppAlg.h"
 #include "TurbKineticEnergyKEpsilonNodeSourceSuppAlg.h"
 
@@ -68,18 +67,13 @@
 #include "kernel/TurbKineticEnergySSTSrcElemKernel.h"
 #include "kernel/TurbKineticEnergySSTDESSrcElemKernel.h"
 #include "kernel/TurbKineticEnergyKEpsilonSrcElemKernel.h"
+#include "kernel/TurbKineticEnergyKsgsBuoyancySrcElemKernel.h"
 
 // bc kernels
 #include "kernel/ScalarOpenAdvElemKernel.h"
 
 // nso
 #include "nso/ScalarNSOElemKernel.h"
-#include "nso/ScalarNSOKeElemSuppAlg.h"
-
-// deprecated
-#include "ScalarMassElemSuppAlgDep.h"
-#include "nso/ScalarNSOKeElemSuppAlg.h"
-#include "nso/ScalarNSOElemSuppAlgDep.h"
 
 #include "overset/UpdateOversetFringeAlgorithmDriver.h"
 
@@ -150,12 +144,17 @@ TurbKineticEnergyEquationSystem::TurbKineticEnergyEquationSystem(
   // sanity check on turbulence model
   if ( (turbulenceModel_ != SST) 
        && (turbulenceModel_ != KSGS) 
+       && (turbulenceModel_ != LRKSGS) 
        && (turbulenceModel_ != DKSGS) 
        && (turbulenceModel_ != SST_DES) 
        && (turbulenceModel_ != KEPS) ) {
-    throw std::runtime_error("User has requested TurbKinEnergyEqs, however, turbulence model is not KSGS, DKSGS, SST or SST_DES, or KEPS");
+    throw std::runtime_error("User has requested TurbKinEnergyEqs, however, turbulence model is not KSGS, LRKSGS, DKSGS, SST or SST_DES, or KEPS");
   }
 
+  // check for low_ksgs compatibility (must be consolidated or edge-based)
+  if ( (turbulenceModel_ == LRKSGS) && !(realm_.solutionOptions_->useConsolidatedSolverAlg_ || realm_.realmUsesEdges_))
+    throw std::runtime_error("lr_ksgs requires either consolidated or edge-based scheme to be active!");
+    
   // create projected nodal gradient equation system
   if ( managePNG_ ) {
     manage_projected_nodal_gradient(eqSystems);
@@ -208,7 +207,7 @@ TurbKineticEnergyEquationSystem::register_nodal_fields(
   stk::mesh::put_field_on_mesh(*evisc_, *part, nullptr);
 
   // allow for nodal values for ksgs model constants
-  if ( turbulenceModel_ == KSGS || turbulenceModel_ == DKSGS ) {
+  if ( turbulenceModel_ == KSGS || turbulenceModel_ == LRKSGS || turbulenceModel_ == DKSGS ) {
     const double cEpsConstant = realm_.get_turb_model_constant(TM_cEps);
     ScalarFieldType *cEpsField 
       = &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "c_epsilon"));
@@ -218,6 +217,16 @@ TurbKineticEnergyEquationSystem::register_nodal_fields(
     ScalarFieldType *cmuEpsField 
       = &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "c_mu_epsilon"));
     stk::mesh::put_field_on_mesh(*cmuEpsField, *part, &cmuEpsConstant);
+
+    if ( turbulenceModel_ == LRKSGS ) {
+      ScalarFieldType *dsqrtk_dx_sq
+        = &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "dsqrtk_dx_sq"));
+      stk::mesh::put_field_on_mesh(*dsqrtk_dx_sq, *part, nullptr);
+      ScalarFieldType *minDistanceToWall 
+        =  &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "minimum_distance_to_wall"));
+      stk::mesh::put_field_on_mesh(*minDistanceToWall, *part, nullptr);
+      realm_.augment_restart_variable_list("minimum_distance_to_wall");
+    }
 
     if ( turbulenceModel_ == DKSGS ) {
       ScalarFieldType *filteredFilter 
@@ -254,7 +263,7 @@ TurbKineticEnergyEquationSystem::register_nodal_fields(
 
       GenericFieldType *filteredDensityStress 
         = &(meta_data.declare_field<GenericFieldType>(stk::topology::NODE_RANK, "filtered_density_stress"));
-      stk::mesh::put_field_on_mesh(*filteredDensityStress, *part, nDim*nDim, nullptr);
+      stk::mesh::put_field_on_mesh(*filteredDensityStress, *part, nDim*nDim, nullptr);  
     }
   }
 
@@ -319,50 +328,12 @@ TurbKineticEnergyEquationSystem::register_interior_algorithm(
       }
       solverAlgDriver_->solverAlgMap_[algType] = theAlg;
       
-      // look for fully integrated source terms
-      std::map<std::string, std::vector<std::string> >::iterator isrc 
-        = realm_.solutionOptions_->elemSrcTermsMap_.find("turbulent_ke");
-      if ( isrc != realm_.solutionOptions_->elemSrcTermsMap_.end() ) {
-        
-        if ( realm_.realmUsesEdges_ )
-          throw std::runtime_error("TurbKineticEnergyElemSrcTerms::Error can not use element source terms for an edge-based scheme");
-        
-        std::vector<std::string> mapNameVec = isrc->second;
-        for (size_t k = 0; k < mapNameVec.size(); ++k ) {
-          std::string sourceName = mapNameVec[k];
-          SupplementalAlgorithm *suppAlg = NULL;
-          if (sourceName == "ksgs_buoyant" ) {
-            if (turbulenceModel_ != KSGS && turbulenceModel_ != DKSGS )
-              throw std::runtime_error("ElemSrcTermsError::TurbKineticEnergyKsgsBuoyantElemSuppAlg requires Ksgs model");
-            suppAlg = new TurbKineticEnergyKsgsBuoyantElemSuppAlg(realm_);
-          }
-          else if (sourceName == "NSO_2ND_ALT" ) {
-            suppAlg = new ScalarNSOElemSuppAlgDep(realm_, tke_, dkdx_, evisc_, 0.0, 1.0);
-          }
-          else if (sourceName == "NSO_4TH_ALT" ) {
-            suppAlg = new ScalarNSOElemSuppAlgDep(realm_, tke_, dkdx_, evisc_, 1.0, 1.0);
-          }
-          else if (sourceName == "NSO_2ND_KE" ) {
-            const double turbSc = realm_.get_turb_schmidt(tke_->name());
-            suppAlg = new ScalarNSOKeElemSuppAlg(realm_, tke_, dkdx_, turbSc, 0.0);
-          }
-          else if (sourceName == "NSO_4TH_KE" ) {
-            const double turbSc = realm_.get_turb_schmidt(tke_->name());
-            suppAlg = new ScalarNSOKeElemSuppAlg(realm_, tke_, dkdx_, turbSc, 1.0);
-          }
-          else if (sourceName == "turbulent_ke_time_derivative" ) {
-            suppAlg = new ScalarMassElemSuppAlgDep(realm_, tke_, false);
-          }
-          else if (sourceName == "lumped_turbulent_ke_time_derivative" ) {
-            suppAlg = new ScalarMassElemSuppAlgDep(realm_, tke_, true);
-          }
-          else {
-            throw std::runtime_error("TurbKineticEnergyElemSrcTerms::Error Source term is not supported: " + sourceName);
-          }     
-          NaluEnv::self().naluOutputP0() << "TurbKineticEnergyElemSrcTerms::added() " << sourceName << std::endl;
-          theAlg->supplementalAlg_.push_back(suppAlg); 
-        }
-      }
+      std::map<std::string, std::vector<std::string> >::iterator isrc
+        = realm_.solutionOptions_->elemSrcTermsMap_.find("specific_dissipation_rate");
+      if (isrc != realm_.solutionOptions_->elemSrcTermsMap_.end()) {
+        // no support for fully integrated source terms through a non-consolidated approach
+        throw std::runtime_error("SpecificDissipationElemSrcTerms:: Fully integrated Source terms are not supported");
+      } 
     }
     else {
       itsi->second->partVec_.push_back(part);
@@ -400,7 +371,7 @@ TurbKineticEnergyEquationSystem::register_interior_algorithm(
       // now create the src alg for tke source
       SupplementalAlgorithm *theSrc = NULL;
       switch(turbulenceModel_) {
-      case KSGS: case DKSGS:
+      case KSGS: case LRKSGS: case DKSGS:
         {
           theSrc = new TurbKineticEnergyKsgsNodeSourceSuppAlg(realm_);
         }
@@ -421,7 +392,7 @@ TurbKineticEnergyEquationSystem::register_interior_algorithm(
         }
         break;
       default:
-        throw std::runtime_error("Unsupported turbulence model in TurbKe: only SST, SST_DES, Ksgs, and DKsgs supported");
+        throw std::runtime_error("Unsupported turbulence model in TurbKe: only SST, SST_DES, Ksgs, LrKsgs and DKsgs supported");
       }
       theAlg->supplementalAlg_.push_back(theSrc);
       
@@ -487,7 +458,11 @@ TurbKineticEnergyEquationSystem::register_interior_algorithm(
 
       build_topo_kernel_if_requested<TurbKineticEnergyKsgsSrcElemKernel>
         (partTopo, *this, activeKernels, "ksgs",
-         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, 0.0);
+
+      build_topo_kernel_if_requested<TurbKineticEnergyKsgsSrcElemKernel>
+        (partTopo, *this, activeKernels, "lr_ksgs",
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, 1.0);
 
       build_topo_kernel_if_requested<TurbKineticEnergyKEpsilonSrcElemKernel>
         (partTopo, *this, activeKernels, "k_epsilon",
@@ -495,7 +470,11 @@ TurbKineticEnergyEquationSystem::register_interior_algorithm(
 
       build_topo_kernel_if_requested<TurbKineticEnergyKsgsDesignOrderSrcElemKernel>
         (partTopo, *this, activeKernels, "design_order_ksgs",
-         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, 0.0);
+
+      build_topo_kernel_if_requested<TurbKineticEnergyKsgsDesignOrderSrcElemKernel>
+        (partTopo, *this, activeKernels, "design_order_lr_ksgs",
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, 1.0);
 
       build_topo_kernel_if_requested<TurbKineticEnergySSTSrcElemKernel>
         (partTopo, *this, activeKernels, "sst",
@@ -533,6 +512,10 @@ TurbKineticEnergyEquationSystem::register_interior_algorithm(
         (partTopo, *this, activeKernels, "rodi",
          realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
 
+      build_topo_kernel_if_requested<TurbKineticEnergyKsgsBuoyancySrcElemKernel>
+        (partTopo, *this, activeKernels, "ksgs_buoyancy",
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
+
       report_invalid_supp_alg_names();
       report_built_supp_alg_names();
     }
@@ -544,7 +527,7 @@ TurbKineticEnergyEquationSystem::register_interior_algorithm(
   if ( itev == diffFluxCoeffAlgDriver_->algMap_.end() ) {
     Algorithm *effDiffAlg = NULL;
     switch(turbulenceModel_) {
-      case KSGS: case DKSGS: case KEPS:
+      case KSGS: case LRKSGS: case DKSGS: case KEPS:
       {
         const double lamSc = realm_.get_lam_schmidt(tke_->name());
         const double turbSc = realm_.get_turb_schmidt(tke_->name());
@@ -971,6 +954,11 @@ TurbKineticEnergyEquationSystem::register_overset_bc()
     // Perform fringe updates after all equation system solves (ideally on the post_time_step)
     equationSystems_.postIterAlgDriver_.push_back(theAlgPost);
     theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(tke_,1,1)));
+    if (realm_.number_of_states()>2)
+    {
+      auto &&tkeN = tke_->field_of_state(stk::mesh::StateN);
+      theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(&tkeN,1,1)));
+    }
   }
 }
 
@@ -1022,12 +1010,17 @@ TurbKineticEnergyEquationSystem::solve_and_update()
 {
 
   // sometimes, a higher level equation system manages the solve and update
-  if ( turbulenceModel_ != KSGS && turbulenceModel_ != DKSGS )
+  if ( turbulenceModel_ != KSGS && turbulenceModel_ != LRKSGS && turbulenceModel_ != DKSGS )
     return;
 
   // compute dk/dx
   if ( isInit_ ) {
     compute_projected_nodal_gradient();
+
+    // initialize low-Re source term
+    if ( turbulenceModel_ == LRKSGS )
+      compute_dsqrtk_dx_sq();
+
     isInit_ = false;
   }
 
@@ -1058,6 +1051,10 @@ TurbKineticEnergyEquationSystem::solve_and_update()
     // deal with "hat" or filtered quantities
     if ( turbulenceModel_ == DKSGS )
       compute_filtered_quantities();
+
+    // low-Re source term
+    if ( turbulenceModel_ == LRKSGS )
+      compute_dsqrtk_dx_sq();
   }
 
 }
@@ -1651,6 +1648,164 @@ TurbKineticEnergyEquationSystem::compute_projected_nodal_gradient()
   }
   else {
     projectedNodalGradEqs_->solve_and_update_external();
+  }
+}
+
+//--------------------------------------------------------------------------
+//-------- compute_dsqrtk_dx_sq --------------------------------------------
+//--------------------------------------------------------------------------
+void
+TurbKineticEnergyEquationSystem::compute_dsqrtk_dx_sq()
+{
+  stk::mesh::MetaData & metaData = realm_.meta_data();
+  stk::mesh::BulkData & bulkData = realm_.bulk_data();
+    
+  const int nDim = metaData.spatial_dimension();
+
+  // extract nodal fields
+  VectorFieldType *coordinates 
+    = metaData.get_field<VectorFieldType>(stk::topology::NODE_RANK, realm_.get_coordinates_name());
+  ScalarFieldType *dualNodalVolume 
+    = metaData.get_field<ScalarFieldType>(stk::topology::NODE_RANK, "dual_nodal_volume");
+
+  // extract fields
+  ScalarFieldType &tkeNp1 = tke_->field_of_state(stk::mesh::StateNP1);
+  ScalarFieldType *dsqrtk_dx_sq
+    = metaData.get_field<ScalarFieldType>(stk::topology::NODE_RANK, "dsqrtk_dx_sq");
+
+  // zero assembled gradient
+  field_fill( metaData, bulkData, 0.0, *dsqrtk_dx_sq, realm_.get_activate_aura());
+
+  // integration point data that is fixed
+  std::vector<double> dsqrtkdxIp(nDim);
+  double *p_dsqrtkdxIp = &dsqrtkdxIp[0];
+
+  // fields to gather
+  std::vector<double> ws_coordinates;
+  std::vector<double> ws_sqrtTke;
+  std::vector<double> ws_dualVolume;
+  std::vector<double> ws_scVolume;
+  std::vector<double> ws_dndx;
+  std::vector<double> ws_deriv;
+  std::vector<double> ws_det_j;
+
+  // select locally owned where vof is defined; exclude inactive block
+  stk::mesh::Selector s_locally_owned_union = metaData.locally_owned_part()
+    & stk::mesh::selectField(tkeNp1)
+    & !(realm_.get_inactive_selector());
+
+  stk::mesh::BucketVector const& elem_buckets =
+    realm_.get_buckets( stk::topology::ELEMENT_RANK, s_locally_owned_union );
+  for ( stk::mesh::BucketVector::const_iterator ib = elem_buckets.begin();
+        ib != elem_buckets.end() ; ++ib ) {
+    stk::mesh::Bucket & b = **ib ;
+    const stk::mesh::Bucket::size_type length   = b.size();
+
+    // extract master element
+    MasterElement *meSCV = sierra::nalu::MasterElementRepo::get_volume_master_element(b.topology());
+
+    // extract master element specifics
+    const int nodesPerElement = meSCV->nodesPerElement_;
+    const int numScvIp = meSCV->numIntPoints_;
+    const int *ipNodeMap = meSCV->ipNodeMap();
+
+    // algorithm related
+    ws_coordinates.resize(nodesPerElement*nDim);
+    ws_sqrtTke.resize(nodesPerElement);
+    ws_dualVolume.resize(nodesPerElement);
+    ws_scVolume.resize(numScvIp);
+    ws_dndx.resize(nDim*numScvIp*nodesPerElement);
+    ws_deriv.resize(nDim*numScvIp*nodesPerElement);
+    ws_det_j.resize(numScvIp);
+
+    // pointers
+    double *p_coordinates = &ws_coordinates[0];
+    double *p_sqrtTke = &ws_sqrtTke[0];
+    double *p_dualVolume = &ws_dualVolume[0];
+    double *p_scVolume = &ws_scVolume[0];
+    double *p_dndx = &ws_dndx[0];
+    
+    for ( stk::mesh::Bucket::size_type k = 0 ; k < length ; ++k ) {
+
+      //===============================================
+      // gather nodal data; this is how we do it now..
+      //===============================================
+      stk::mesh::Entity const * node_rels = b.begin_nodes(k);
+      int num_nodes = b.num_nodes(k);
+
+      // sanity check on num nodes
+      ThrowAssert( num_nodes == nodesPerElement );
+
+      for ( int ni = 0; ni < num_nodes; ++ni ) {
+        stk::mesh::Entity node = node_rels[ni];
+
+        // pointers to real data
+        const double * coords = stk::mesh::field_data(*coordinates, node);
+
+        // gather scalars
+        p_sqrtTke[ni] = std::sqrt(*stk::mesh::field_data(tkeNp1, node));
+        p_dualVolume[ni] = *stk::mesh::field_data(*dualNodalVolume, node);
+
+        // gather vectors
+        const int offSet = ni*nDim;
+        for ( int j=0; j < nDim; ++j ) {
+          p_coordinates[offSet+j] = coords[j];
+        }
+      }
+      
+      // compute geometry
+      double scvError = 0.0;
+      meSCV->determinant(1, &p_coordinates[0], &p_scVolume[0], &scvError);
+
+      // compute dndx
+      meSCV->grad_op(1, &p_coordinates[0], &p_dndx[0], &ws_deriv[0], &ws_det_j[0], &scvError);
+      
+      for ( int ip = 0; ip < numScvIp; ++ip ) {
+        
+        // zero local ip gradient
+        for ( int j = 0; j < nDim; ++j ) {
+          p_dsqrtkdxIp[j] = 0.0;
+        }
+        
+        // compute gradient
+        for ( int ic = 0; ic < nodesPerElement; ++ic ) {
+          const int offSetDnDx = nDim*nodesPerElement*ip + ic*nDim;
+          const double nodalSqrtTke = p_sqrtTke[ic];
+          for ( int j = 0; j < nDim; ++j ) {
+            p_dsqrtkdxIp[j] += p_dndx[offSetDnDx+j]*nodalSqrtTke;
+          }
+        }
+        
+        // magnitude
+        double dsqrtksq = 0.0;
+        for ( int j = 0; j < nDim; ++j ) {
+          dsqrtksq += p_dsqrtkdxIp[j]*p_dsqrtkdxIp[j];
+        }
+
+        // nearest node for this ip
+        const int nn = ipNodeMap[ip];
+        stk::mesh::Entity node = node_rels[nn];
+
+        // pointers to real data
+        double * dsq = stk::mesh::field_data(*dsqrtk_dx_sq, node);
+
+        // assemble
+        *dsq += dsqrtksq*p_scVolume[ip]/p_dualVolume[nn];
+      }
+    }
+  }
+  
+  // parallel sum
+  stk::mesh::parallel_sum(bulkData, {dsqrtk_dx_sq});
+  
+  // periodic assemble
+  if ( realm_.hasPeriodic_) {
+    realm_.periodic_field_update(dsqrtk_dx_sq, 1);
+  }
+
+  // overset update
+  if ( realm_.hasOverset_ ) {
+    realm_.overset_constraint_node_field_update(dsqrtk_dx_sq, 1, 1);
   }
 }
 

@@ -79,7 +79,8 @@ SolutionOptions::SolutionOptions()
     mdotAlgInflow_(0.0),
     mdotAlgOpen_(0.0),
     quadType_("GaussLegendre"),
-    accousticallyCompressible_(false)
+    accousticallyCompressible_(false),
+    balancedForce_(false)
 {
   // nothing to do
 }
@@ -107,7 +108,6 @@ void
 SolutionOptions::load(const YAML::Node & y_node)
 {
   const bool optional=true;
-  const bool required=!optional;
 
   const YAML::Node y_solution_options = expect_map(y_node,"solution_options", optional);
   if(y_solution_options)
@@ -149,6 +149,15 @@ SolutionOptions::load(const YAML::Node & y_node)
     // accoustically compressible algorith
     get_if_present(y_solution_options, "use_accoustically_compressible_algorithm", accousticallyCompressible_);
 
+    // balanced-force area and inverse density scaling
+    get_if_present_no_default(y_solution_options, "activate_balanced_force_algorithm", balancedForce_);
+
+    // Buoyancy pressure stabilization 
+    if(balancedForce_)
+      get_if_present(y_solution_options, "activate_buoyancy_pressure_stabilization", buoyancyPressureStab_, true);
+    else
+      get_if_present(y_solution_options, "activate_buoyancy_pressure_stabilization", buoyancyPressureStab_, false);
+          
     // extract turbulence model; would be nice if we could parse an enum..
     std::string specifiedTurbModel;
     std::string defaultTurbModel = "laminar";
@@ -193,7 +202,7 @@ SolutionOptions::load(const YAML::Node & y_node)
       inputVariablesPeriodicTime_, inputVariablesPeriodicTime_);
 
     // first set of options; hybrid, source, etc.
-    const YAML::Node y_options = expect_sequence(y_solution_options, "options", required);
+    const YAML::Node y_options = expect_sequence(y_solution_options, "options", optional);
     if (y_options) {
       for (size_t ioption = 0; ioption < y_options.size(); ++ioption)
       {
@@ -291,7 +300,6 @@ SolutionOptions::load(const YAML::Node & y_node)
         
           if (expect_sequence( y_user_constants, "gravity", optional) ) {
             const int gravSize = y_user_constants["gravity"].size();
-            gravity_.resize(gravSize);
             for (int i = 0; i < gravSize; ++i ) {
               gravity_[i] = y_user_constants["gravity"][i].as<double>() ;
             }
@@ -354,13 +362,21 @@ SolutionOptions::load(const YAML::Node & y_node)
       else {        
         for (size_t ioption = 0; ioption < y_mesh_motion.size(); ++ioption) {
           const YAML::Node &y_option = y_mesh_motion[ioption];
-          
-          // extract mesh motion name and omega value
+
+          // extract mesh motion name
           std::string motionName = "na";
           get_required(y_option, "name", motionName);
           double omega = 0.0;
-          get_required(y_option, "omega", omega);
-          
+
+
+          // Check for 6 DOF
+          bool sixDOF = false;
+          get_if_present(y_option, "include_six_dof", sixDOF, sixDOF);
+
+          // Assume straight rotation if no sixDOF included          
+          if ( !sixDOF )
+            get_required(y_option, "omega", omega);
+
           // now fill in name
           std::vector<std::string> meshMotionBlock;
           const YAML::Node &targets = y_option["target_name"];
@@ -393,21 +409,93 @@ SolutionOptions::load(const YAML::Node & y_node)
             computeCentroid = false;
           }
 
+
           // look for unit vector; provide default
           std::vector<double> unitVec(3,0.0); 
-          const YAML::Node uV = y_option["unit_vector"];
-          if ( uV ) {
-            for ( size_t i = 0; i < uV.size(); ++i )
-              unitVec[i] = uV[i].as<double>() ;
+          if ( !sixDOF ) {
+            const YAML::Node uV = y_option["unit_vector"];
+            if ( uV ) {
+              for ( size_t i = 0; i < uV.size(); ++i )
+                unitVec[i] = uV[i].as<double>() ;
+            }
+            else {
+              NaluEnv::self().naluOutputP0() << "SolutionOptions::load() unit_vector not supplied; will use 0,0,1" << std::endl;
+              unitVec[2] = 1.0;
+            }
+          }
+
+          if ( sixDOF ) {
+
+            std::vector<std::string> forceSurface;
+            std::vector<double> bodyAngle(3,0.0);
+            std::vector<double> bodyOmega(3,0.0);
+            std::vector<double> appliedForce(3,0.0);
+            std::vector<double> bodyPrincInertia(3,0.0);
+            std::vector<double> bodyVel(3,0.0);
+            std::vector<double> bodyDispCC(3,0.0);
+
+            // Check for all 6-DOF related inputs
+            const YAML::Node fS = y_option["forcing_surface"];
+            if ( fS ) {
+              for ( size_t i = 0; i < fS.size(); ++i )
+                forceSurface.push_back(fS[i].as<std::string>()) ;
+            }
+
+            const YAML::Node bA = y_option["body_angle"];
+            if ( bA ) {
+              for ( size_t i = 0; i < bA.size(); ++i )
+                bodyAngle[i] = bA[i].as<double>() ;
+            }
+
+            const YAML::Node bdCC = y_option["body_cc_disp"];
+            if ( bdCC ) {
+              for ( size_t i = 0; i < bdCC.size(); ++i )
+                bodyDispCC[i] = bdCC[i].as<double>() ;
+            }
+
+            const YAML::Node bO = y_option["body_omega"];
+            if ( bO ) {
+              for ( size_t i = 0; i < bO.size(); ++i )
+                bodyOmega[i] = bO[i].as<double>() ;
+            }
+
+            const YAML::Node bF = y_option["applied_force"];
+            if ( bF ) {
+              for ( size_t i = 0; i < bF.size(); ++i )
+                appliedForce[i] = bF[i].as<double>() ; 
+            }
+
+            const YAML::Node bFI = y_option["principal_moments_inertia"];
+            if ( bFI ) {
+              for ( size_t i = 0; i < bFI.size(); ++i )
+                bodyPrincInertia[i] = bFI[i].as<double>() ; 
+            }
+
+            const YAML::Node bV = y_option["body_velocity"];
+            if ( bV ) {
+              for ( size_t i = 0; i < bV.size(); ++i )
+                bodyVel[i] = bV[i].as<double>() ;
+            }
+
+            double bodyMass = 0.0;
+            get_if_present(y_option, "body_mass", bodyMass, bodyMass);
+
+            double bodyDen = 0.0;
+            get_if_present(y_option, "body_density", bodyDen, bodyDen);
+
+            MeshMotionInfo *meshInfo = new MeshMotionInfo(meshMotionBlock, forceSurface, bodyDispCC, bodyAngle, bodyOmega, bodyPrincInertia, cCoordsVec, bodyVel, bodyMass, bodyDen, appliedForce, computeCentroid);
+
+            // set the map
+            meshMotionInfoMap_[motionName] = meshInfo;
+
           }
           else {
-            NaluEnv::self().naluOutputP0() << "SolutionOptions::load() unit_vector not supplied; will use 0,0,1" << std::endl;
-            unitVec[2] = 1.0;
+
+            MeshMotionInfo *meshInfo = new MeshMotionInfo(meshMotionBlock, omega, cCoordsVec, unitVec, computeCentroid);
+            // set the map
+            meshMotionInfoMap_[motionName] = meshInfo;
+
           }
-          
-          MeshMotionInfo *meshInfo = new MeshMotionInfo(meshMotionBlock, omega, cCoordsVec, unitVec, computeCentroid);
-          // set the map
-          meshMotionInfoMap_[motionName] = meshInfo;
         }
       }
     }
@@ -689,13 +777,10 @@ SolutionOptions::get_skew_symmetric(const std::string& dofName) const
   return factor;
 }
 
-std::vector<double>
-SolutionOptions::get_gravity_vector(const unsigned nDim) const
+std::array<double, 3> 
+SolutionOptions::get_gravity_vector() const
 {
-  if ( nDim != gravity_.size() )
-    throw std::runtime_error("SolutionOptions::get_gravity_vector():Error Expected size does not equaly nDim");
-  else
-    return gravity_;
+  return gravity_;
 }
 
 //--------------------------------------------------------------------------

@@ -67,6 +67,8 @@ private:
   double gamma2_{0.0};
   double gamma3_{0.0};
   const bool lumpedMass_;
+  const double densFac_;
+  const double om_densFac_;
 
   /// Integration point to node mapping
   const int* ipNodeMap_;

@@ -30,7 +30,7 @@ class MasterElement;
 template <typename T> class PecletFunction;
 class SolutionOptions;
 
-/** Symmetry kernel for scalar equation
+/** open advection kernel for scalar equation
  */
 template<typename BcAlgTraits>
 class ScalarOpenAdvElemKernel: public Kernel

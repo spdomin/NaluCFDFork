@@ -90,6 +90,13 @@ struct MassFraction {
   {}
 };
 
+struct VolumeOfFluid {
+  double vof_;
+  VolumeOfFluid()
+    : vof_(0.0)
+  {}
+};
+
 struct Emissivity {
   double emissivity_;
   Emissivity()
@@ -182,6 +189,7 @@ struct WallUserData : public UserData {
   TurbKinEnergy tke_;
   MixtureFraction mixFrac_;
   MassFraction massFraction_;
+  VolumeOfFluid vof_;
   Emissivity emissivity_;
   Irradiation irradiation_;
   Transmissivity transmissivity_;
@@ -231,16 +239,17 @@ struct InflowUserData : public UserData {
   TurbDiss eps_;
   MixtureFraction mixFrac_;
   MassFraction massFraction_;
- 
+  VolumeOfFluid vof_;
   bool uSpec_;
   bool tkeSpec_;
   bool sdrSpec_;
   bool epsSpec_;
   bool mixFracSpec_;
   bool massFractionSpec_;
+  bool vofSpec_;
   InflowUserData()
     : UserData(),
-    uSpec_(false), tkeSpec_(false), sdrSpec_(false), epsSpec_(false), mixFracSpec_(false), massFractionSpec_(false)
+    uSpec_(false), tkeSpec_(false), sdrSpec_(false), epsSpec_(false), mixFracSpec_(false), massFractionSpec_(false), vofSpec_(false)
   {}
 };
 
@@ -252,7 +261,8 @@ struct OpenUserData : public UserData {
   TurbDiss eps_;
   MixtureFraction mixFrac_;
   MassFraction massFraction_;
- 
+  VolumeOfFluid vof_;
+
   bool uSpec_;
   bool pSpec_;
   bool tkeSpec_;
@@ -260,12 +270,12 @@ struct OpenUserData : public UserData {
   bool epsSpec_;
   bool mixFracSpec_;
   bool massFractionSpec_;
-  
+  bool vofSpec_;
   bool useTotalP_;
 
   OpenUserData()
     : UserData(),
-    uSpec_(false), pSpec_(false), tkeSpec_(false), sdrSpec_(false), epsSpec_(false), mixFracSpec_(false), massFractionSpec_(false), useTotalP_(false)
+    uSpec_(false), pSpec_(false), tkeSpec_(false), sdrSpec_(false), epsSpec_(false), mixFracSpec_(false), massFractionSpec_(false), vofSpec_(false), useTotalP_(false)
   {}
 };
 
@@ -296,12 +306,14 @@ struct OversetUserData : public UserData {
   /// Exterior boundary of the internal meshe(s) that are mandatory receptors
   std::string oversetSurface_;
 
+  /// Type of shape used for STK element removal
+  std::string cuttingShape_;
+
+  /// Axial direction for cylindrical cut
+  int cuttingAxis_;
+
   /// List of part names for the interior meshes
   std::vector<std::string> oversetBlockVec_;
-
-#ifdef NALU_USES_TIOGA
-  YAML::Node oversetBlocks_;
-#endif
 
   OversetUserData()
     : UserData(),
@@ -313,7 +325,9 @@ struct OversetUserData : public UserData {
       backgroundSurface_("na"),
       backgroundCutBlock_("na"),
       backgroundInnerBlock_("na"),
-      oversetSurface_("na")
+      oversetSurface_("na"),
+      cuttingShape_("aabb"),
+      cuttingAxis_(2)
   {}
 };
 
@@ -370,7 +384,6 @@ struct OpenBoundaryConditionData : public BoundaryCondition {
 struct OversetBoundaryConditionData : public BoundaryCondition {
   enum OversetAPI {
     NALU_STK      = 0, ///< Native Nalu holecutting using STK search
-    TPL_TIOGA     = 1, ///< Overset connectivity using TIOGA
     OVERSET_NONE  = 2  ///< Guard for error messages
   };
 
@@ -551,6 +564,10 @@ template<> struct convert<sierra::nalu::MixtureFraction> {
 
 template<> struct convert<sierra::nalu::MassFraction> {
   static bool decode(const Node& node, sierra::nalu::MassFraction& rhs) ;
+};
+
+template<> struct convert<sierra::nalu::VolumeOfFluid> {
+  static bool decode(const Node& node, sierra::nalu::VolumeOfFluid& rhs) ;
 };
 
 template<> struct convert<sierra::nalu::Emissivity> {

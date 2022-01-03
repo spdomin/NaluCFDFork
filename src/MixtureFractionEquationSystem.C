@@ -1,4 +1,3 @@
-
 /*------------------------------------------------------------------------*/
 /*  Copyright 2014 Sandia Corporation.                                    */
 /*  This software is released under the license detailed                  */
@@ -59,14 +58,9 @@
 // bc kernels
 #include "kernel/ScalarOpenAdvElemKernel.h"
 
-// deprecated
-#include "ScalarMassElemSuppAlgDep.h"
-#include "nso/ScalarNSOElemSuppAlgDep.h"
-
 // nso
 #include "nso/ScalarNSOElemKernel.h"
 #include "nso/ScalarNSOKeElemKernel.h"
-#include "nso/ScalarNSOKeElemSuppAlg.h"
 
 // user function
 #include "user_functions/VariableDensityMixFracSrcElemSuppAlg.h"
@@ -296,32 +290,6 @@ MixtureFractionEquationSystem::register_interior_algorithm(
           SupplementalAlgorithm *suppAlg = NULL;
           if (sourceName == "VariableDensity" ) {
             suppAlg = new VariableDensityMixFracSrcElemSuppAlg(realm_);
-          }
-          else if (sourceName == "NSO_2ND" ) {
-            suppAlg = new ScalarNSOElemSuppAlgDep(realm_, mixFrac_, dzdx_, evisc_, 0.0, 0.0);
-          }
-          else if (sourceName == "NSO_2ND_ALT" ) {
-            suppAlg = new ScalarNSOElemSuppAlgDep(realm_, mixFrac_, dzdx_, evisc_, 0.0, 1.0);
-          }
-          else if (sourceName == "NSO_4TH" ) {
-            suppAlg = new ScalarNSOElemSuppAlgDep(realm_, mixFrac_, dzdx_, evisc_, 1.0, 0.0);
-          }
-          else if (sourceName == "NSO_4TH_ALT" ) {
-            suppAlg = new ScalarNSOElemSuppAlgDep(realm_, mixFrac_, dzdx_, evisc_, 1.0, 1.0);
-          }
-          else if (sourceName == "NSO_2ND_KE" ) {
-            const double turbSc = realm_.get_turb_schmidt(mixFrac_->name());
-            suppAlg = new ScalarNSOKeElemSuppAlg(realm_, mixFrac_, dzdx_, turbSc, 0.0);
-          }
-          else if (sourceName == "NSO_4TH_KE" ) {
-            const double turbSc = realm_.get_turb_schmidt(mixFrac_->name());
-            suppAlg = new ScalarNSOKeElemSuppAlg(realm_, mixFrac_, dzdx_, turbSc, 1.0);
-          }
-          else if (sourceName == "mixture_fraction_time_derivative" ) {
-            suppAlg = new ScalarMassElemSuppAlgDep(realm_, mixFrac_, false);
-          }
-          else if (sourceName == "lumped_mixture_fraction_time_derivative" ) {
-            suppAlg = new ScalarMassElemSuppAlgDep(realm_, mixFrac_, true);
           }
           else {
             throw std::runtime_error("MixtureFractionElemSrcTerms::Error Source term is not supported: " + sourceName);
@@ -855,6 +823,11 @@ MixtureFractionEquationSystem::register_overset_bc()
     // Perform fringe updates after all equation system solves (ideally on the post_time_step)
     equationSystems_.postIterAlgDriver_.push_back(theAlgPost);
     theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(mixFrac_,1,1)));
+    if (realm_.number_of_states()>2)
+    {
+      auto &&mixFracN = mixFrac_->field_of_state(stk::mesh::StateN);
+      theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(&mixFracN,1,1)));
+    }
   }
 }
 
@@ -905,7 +878,7 @@ void
 MixtureFractionEquationSystem::register_initial_condition_fcn(
   stk::mesh::Part *part,
   const std::map<std::string, std::string> &theNames,
-  const std::map<std::string, std::vector<double> > &/*theParams*/)
+  const std::map<std::string, std::vector<double> > &theParams)
 {
   // iterate map and check for name
   const std::string dofName = "mixture_fraction";
@@ -913,14 +886,24 @@ MixtureFractionEquationSystem::register_initial_condition_fcn(
     = theNames.find(dofName);
   if (iterName != theNames.end()) {
     std::string fcnName = (*iterName).second;
+
     AuxFunction *theAuxFunc = NULL;
+    std::vector<double> fcnParams;
+    
+    // extract the params
+    std::map<std::string, std::vector<double> >::const_iterator iterParams
+      = theParams.find(dofName);
+    if (iterParams != theParams.end()) {
+      fcnParams = (*iterParams).second;	
+    }
+
     if ( fcnName == "VariableDensity" ) {
       // create the function
       theAuxFunc = new VariableDensityMixFracAuxFunction();      
     }
     else if ( fcnName == "RayleighTaylor" ) {
       // create the function
-      theAuxFunc = new RayleighTaylorMixFracAuxFunction();      
+      theAuxFunc = new RayleighTaylorMixFracAuxFunction(fcnParams);      
     }
     else {
       throw std::runtime_error("MixtureFractionEquationSystem::register_initial_condition_fcn: VariableDensity only supported");

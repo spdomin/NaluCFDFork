@@ -115,7 +115,6 @@ ContinuityAdvElemKernel<AlgTraits>::execute(
     const int il = lrscv_[2*ip];
     const int ir = lrscv_[2*ip+1];
 
-    DoubleType rhoIp = 0.0;
     for (int j = 0; j < AlgTraits::nDim_; ++j) {
       w_rho_uIp[j] = 0.0;
       w_Gpdx_Ip[j] = 0.0;
@@ -126,8 +125,6 @@ ContinuityAdvElemKernel<AlgTraits>::execute(
       const DoubleType r = v_shape_function_(ip, ic);
       const DoubleType nodalPressure = v_pressure(ic);
       const DoubleType nodalRho = v_densityNp1(ic);
-
-      rhoIp += r * nodalRho;
 
       DoubleType lhsfac = 0.0;
       for (int j = 0; j < AlgTraits::nDim_; ++j) {

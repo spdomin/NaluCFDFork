@@ -21,6 +21,7 @@
 #include <EquationSystems.h>
 #include <Teuchos_RCP.hpp>
 #include <overset/OversetManager.h>
+#include <MeshMotionInfo.h>
 
 #include <stk_util/util/ParameterList.hpp>
 
@@ -136,6 +137,7 @@ class Realm {
   void delete_edges();
   void commit();
 
+  void update_six_dof_motion();
   void process_mesh_motion();
   void compute_centroid_on_parts(
     std::vector<std::string> partNames,
@@ -155,6 +157,53 @@ class Realm {
   void set_omega(
     stk::mesh::Part *targetPart,
     double omega);
+  void advance_omega_dt(
+    std::vector<double> &bodyFrameOme,
+    std::vector<double> &bodyFrameIne,
+    std::vector<double> &bodyFrameMom,
+    double dt);
+  void update_body_vel(
+    MeshMotionInfo &motion,
+    double dt);
+  void update_body_cc(
+    MeshMotionInfo &motion,
+    double dt);
+  void set_displacement_six_dof(
+    stk::mesh::Part *targetPart,
+    const std::vector<double> &centroidCoords,
+    const std::vector<double> &centroidDisp,
+    const std::vector<double> &bodyAngle);
+  void set_mesh_velocity_six_dof(
+    stk::mesh::Part *targetPart,
+    MeshMotionInfo &motion);
+  std::vector<double> get_rotmat_from_quat(
+    std::vector<double> &quat,
+    bool to_frame = true);
+  std::vector<double> rotate_translate_point(
+    const std::vector<double> &point,
+    const std::vector<double> &centroidCoords,
+    const std::vector<double> &centroidDisp,
+    const std::vector<double> &bodyAngle);
+  std::vector<double> get_quat_from_eulerxyz(
+    const std::vector<double> &bodyAngle);
+  std::vector<double> get_eulerxyz_from_quat(
+    const std::vector<double> &quat);
+  std::vector<double> convert_vect_to_orig_frame(
+    const std::vector<double> &vect,
+    const std::vector<double> &bodyAngle,
+    bool to_lab_frame);
+  void evaluate_quat_rhs(
+    std::vector<double> &quat,
+    std::vector<double> &omega,
+    std::vector<double> &qrhs);
+  double assess_rigid_euler_rhs(
+    double momentRHS,
+    double omega1RHS,
+    double omega2RHS,
+    double i0LHS,
+    double i1RHS,
+    double i2RHS);
+
   void set_current_displacement(
     stk::mesh::Part *targetPart,
     const std::vector<double> &centroidCoords,
@@ -244,7 +293,7 @@ class Realm {
 
   const stk::mesh::PartVector &get_subject_part_vector();
 
-  void overset_orphan_node_field_update(
+  void overset_constraint_node_field_update(
     stk::mesh::FieldBase *theField,
     const unsigned sizeRow,
     const unsigned sizeCol);
@@ -474,6 +523,7 @@ class Realm {
   // types of physics
   bool isothermal_;
   bool uniform_;
+  bool gasDynamics_;
 
   // some post processing of entity counts
   bool provideEntityCount_;

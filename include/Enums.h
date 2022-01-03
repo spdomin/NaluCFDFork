@@ -64,12 +64,14 @@ enum EquationType {
   EQ_SPEC_DISS_RATE = 8,
   EQ_TURBULENT_DISS = 9,
   EQ_MASS_FRACTION = 10,
-  EQ_PNG   = 11,
-  EQ_PNG_P = 12,
-  EQ_PNG_Z = 13,
-  EQ_PNG_H = 14,
-  EQ_PNG_U = 15,
-  EQ_PNG_TKE = 16, // FIXME... Last PNG managed like this..
+  EQ_VOLUME_OF_FLUID = 11,
+  EQ_GASDYN = 12,
+  EQ_PNG   = 13,
+  EQ_PNG_P = 14,
+  EQ_PNG_Z = 15,
+  EQ_PNG_H = 16,
+  EQ_PNG_U = 17,
+  EQ_PNG_TKE = 18, // FIXME... Last PNG managed like this..
   EquationSystemType_END
 };
 
@@ -85,6 +87,8 @@ static const std::string EquationTypeMap[] = {
   "Specific_Dissipation_Rate",
   "Turbulent_Dissipation",
   "Mass_Fraction",
+  "Volume_of_Fluid",
+  "Gas_Dynamics",
   "PNG",
   "PNG_P",
   "PNG_Z",
@@ -111,6 +115,8 @@ enum PropertyIdentifier {
   LAME_MU_ID = 6,
   LAME_LAMBDA_ID = 7,
   SCATTERING_COEFF_ID = 8,
+  SURFACE_TENSION_ID = 9,
+  GAMMA_ID = 10,
   PropertyIdentifier_END
 };
 
@@ -123,7 +129,9 @@ static const std::string PropertyIdentifierNames[] = {
   "enthalpy",
   "lame_mu",
   "lame_lambda",
-  "scattering_coefficient"};
+  "scattering_coefficient",
+  "surface_tension",
+  "gamma"};
 
 // prop enum and name below
 enum  MaterialPropertyType {
@@ -134,6 +142,7 @@ enum  MaterialPropertyType {
   GEOMETRIC_MAT = 4,
   HDF5_TABLE_MAT = 5,
   GENERIC = 6,
+  VOF_MAT = 7,
   MaterialPropertyType_END
 };
 
@@ -151,6 +160,7 @@ enum TurbulenceModel {
   SST_DES = 5,
   DKSGS = 6,
   KEPS = 7,
+  LRKSGS = 8,
   TurbulenceModel_END
 };  
 
@@ -163,7 +173,8 @@ static const std::string TurbulenceModelNames[] = {
   "sst",
   "sst_des",
   "dynamic_ksgs",
-  "k_epsilon"};
+  "k_epsilon",
+  "lr_ksgs"};
 
 enum TurbulenceModelConstant {
   TM_cMu = 0,

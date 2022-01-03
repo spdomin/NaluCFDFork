@@ -30,12 +30,14 @@
 #include "AssembleNodalGradElemAlgorithm.h"
 #include "AssembleNodalGradBoundaryAlgorithm.h"
 #include "AssembleNodalGradPBoundaryAlgorithm.h"
+#include "AssembleNodalGradPAWBoundaryAlgorithm.h"
 #include "AssembleNodalGradNonConformalAlgorithm.h"
 #include "AssembleNodalGradUAlgorithmDriver.h"
 #include "AssembleNodalGradUEdgeAlgorithm.h"
 #include "AssembleNodalGradUElemAlgorithm.h"
 #include "AssembleNodalGradUBoundaryAlgorithm.h"
 #include "AssembleNodalGradUNonConformalAlgorithm.h"
+#include "AssembleNodalGradPAWElemAlgorithm.h"
 #include "AssembleNodeSolverAlgorithm.h"
 #include "AuxFunctionAlgorithm.h"
 #include "ComputeDynamicPressureAlgorithm.h"
@@ -43,8 +45,10 @@
 #include "ComputeMdotInflowAlgorithm.h"
 #include "ComputeMdotEdgeAlgorithm.h"
 #include "ComputeMdotElemAlgorithm.h"
+#include "ComputeMdotVofElemAlgorithm.h"
 #include "ComputeMdotEdgeOpenAlgorithm.h"
 #include "ComputeMdotElemOpenAlgorithm.h"
+#include "ComputeMdotVofElemOpenAlgorithm.h"
 #include "ComputeMdotNonConformalAlgorithm.h"
 #include "ComputeWallFrictionVelocityAlgorithm.h"
 #include "ComputeWallFrictionVelocityProjectedAlgorithm.h"
@@ -84,6 +88,8 @@
 #include "Realms.h"
 #include "SurfaceForceAndMomentAlgorithmDriver.h"
 #include "SurfaceForceAndMomentAlgorithm.h"
+#include "SixDofSurfaceForceAndMomentAlgorithmDriver.h"
+#include "SixDofSurfaceForceAndMomentAlgorithm.h"
 #include "SurfaceForceAndMomentWallFunctionAlgorithm.h"
 #include "SurfaceForceAndMomentWallFunctionProjectedAlgorithm.h"
 #include "Simulation.h"
@@ -105,17 +111,21 @@
 
 // kernels
 #include "kernel/ContinuityAdvElemKernel.h"
+#include "kernel/ContinuityVofAdvElemKernel.h"
+#include "kernel/ContinuityGclElemKernel.h"
 #include "kernel/ContinuityMassElemKernel.h"
 #include "kernel/MomentumAdvDiffElemKernel.h"
 #include "kernel/MomentumActuatorSrcElemKernel.h"
 #include "kernel/MomentumBuoyancyBoussinesqSrcElemKernel.h"
 #include "kernel/MomentumBuoyancySrcElemKernel.h"
+#include "kernel/MomentumGclElemKernel.h"
 #include "kernel/MomentumMassElemKernel.h"
 #include "kernel/MomentumUpwAdvDiffElemKernel.h"
 
 // bc kernels
 #include "kernel/ContinuityInflowElemKernel.h"
 #include "kernel/ContinuityOpenElemKernel.h"
+#include "kernel/ContinuityVofOpenElemKernel.h"
 #include "kernel/MomentumOpenAdvDiffElemKernel.h"
 #include "kernel/MomentumSymmetryElemKernel.h"
 #include "kernel/MomentumWallFunctionElemKernel.h"
@@ -141,11 +151,12 @@
 #include "user_functions/WindEnergyTaylorVortexAuxFunction.h"
 #include "user_functions/WindEnergyTaylorVortexPressureAuxFunction.h"
 
-#include "user_functions/SteadyTaylorVortexMomentumSrcElemSuppAlg.h"
-#include "user_functions/SteadyTaylorVortexContinuitySrcElemSuppAlg.h"
-#include "user_functions/SteadyTaylorVortexMomentumSrcNodeSuppAlg.h"
+#include "user_functions/MeshMotionAuxFunction.h"
+
 #include "user_functions/SteadyTaylorVortexVelocityAuxFunction.h"
 #include "user_functions/SteadyTaylorVortexPressureAuxFunction.h"
+#include "user_functions/SteadyTaylorVortexMomentumSrcElemKernel.h"
+#include "user_functions/SteadyTaylorVortexContinuitySrcElemKernel.h"
 
 #include "user_functions/VariableDensityVelocityAuxFunction.h"
 #include "user_functions/VariableDensityPressureAuxFunction.h"
@@ -180,12 +191,7 @@
 
 #include "user_functions/PulseVelocityAuxFunction.h"
 
-// deprecated
-#include "ContinuityMassElemSuppAlgDep.h"
-#include "MomentumMassElemSuppAlgDep.h"
-#include "MomentumBuoyancySrcElemSuppAlgDep.h"
-#include "nso/MomentumNSOKeElemSuppAlgDep.h"
-#include "nso/MomentumNSOElemSuppAlgDep.h"
+#include "user_functions/LinearAuxFunction.h"
 
 // stk_util
 #include <stk_util/parallel/Parallel.hpp>
@@ -233,6 +239,7 @@ LowMachEquationSystem::LowMachEquationSystem(
     dualNodalVolume_(NULL),
     edgeAreaVec_(NULL),
     surfaceForceAndMomentAlgDriver_(NULL),
+    sixDofSurfaceForceAndMomentAlgDriver_(NULL),
     isInit_(true)
 {
   // push back EQ to manager
@@ -280,7 +287,7 @@ LowMachEquationSystem::register_nodal_fields(
 
   stk::mesh::MetaData &meta_data = realm_.meta_data();
 
-  // add properties; denisty needs to be a restart field
+  // add properties; density needs to be a restart field
   const int numStates = realm_.number_of_states();
   density_ =  &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "density", numStates));
   stk::mesh::put_field_on_mesh(*density_, *part, nullptr);
@@ -319,7 +326,7 @@ LowMachEquationSystem::register_nodal_fields(
 }
 
 //--------------------------------------------------------------------------
-//-------- register_element_fields -------------------------------------------
+//-------- register_element_fields -----------------------------------------
 //--------------------------------------------------------------------------
 void
 LowMachEquationSystem::register_element_fields(
@@ -335,6 +342,12 @@ LowMachEquationSystem::register_element_fields(
     const int numScsIp = meSCS->numIntPoints_;
     GenericFieldType *massFlowRate = &(meta_data.declare_field<GenericFieldType>(stk::topology::ELEMENT_RANK, "mass_flow_rate_scs"));
     stk::mesh::put_field_on_mesh(*massFlowRate, *part, numScsIp, nullptr);
+
+    if ( realm_.solutionOptions_->balancedForce_ ) {
+      GenericFieldType *volumeFlowRate 
+        = &(meta_data.declare_field<GenericFieldType>(stk::topology::ELEMENT_RANK, "volume_flow_rate_scs"));
+      stk::mesh::put_field_on_mesh(*volumeFlowRate, *part, numScsIp, nullptr);
+    }
   }
 
   // deal with fluids error indicator; elemental field of size unity
@@ -501,6 +514,13 @@ LowMachEquationSystem::register_open_bc(
                                                  "open_mass_flow_rate"));
   stk::mesh::put_field_on_mesh(*mdotBip, *part, numScsBip, nullptr);
 
+  if ( realm_.solutionOptions_->balancedForce_ ) {
+    GenericFieldType *volBip 
+      = &(metaData.declare_field<GenericFieldType>(static_cast<stk::topology::rank_t>(metaData.side_rank()), 
+                                                   "open_volume_flow_rate"));
+    stk::mesh::put_field_on_mesh(*volBip, *part, numScsBip, nullptr);
+  }
+
   // pbip; always register (initial value of zero)
   std::vector<double> zeroVec(numScsBip,0.0);
   GenericFieldType *pBip 
@@ -515,6 +535,30 @@ LowMachEquationSystem::register_open_bc(
   }
 }
 
+//--------------------------------------------------------------------------
+//-------- register_surface_six_dof_algorithm ------------------------------
+//--------------------------------------------------------------------------
+void
+LowMachEquationSystem::register_surface_six_dof_algorithm(
+  MeshMotionInfo* motion,
+  stk::mesh::PartVector &partVector)
+{
+
+  // register nodal fields in common
+  stk::mesh::MetaData &meta_data = realm_.meta_data();
+
+  ScalarFieldType *assembledArea =  &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "assembled_area_six_dof"));
+  stk::mesh::put_field_on_mesh(*assembledArea, stk::mesh::selectUnion(partVector), nullptr);
+  if ( nullptr == sixDofSurfaceForceAndMomentAlgDriver_ ) {
+    sixDofSurfaceForceAndMomentAlgDriver_ = new SixDofSurfaceForceAndMomentAlgorithmDriver(realm_);
+  }
+
+  SixDofSurfaceForceAndMomentAlgorithm *sdAlg
+    = new SixDofSurfaceForceAndMomentAlgorithm(
+        realm_, motion, partVector, realm_.realmUsesEdges_, assembledArea);
+  sixDofSurfaceForceAndMomentAlgDriver_->algVec_.push_back(sdAlg);
+
+}
 //--------------------------------------------------------------------------
 //-------- register_surface_pp_algorithm -----------------------------------
 //--------------------------------------------------------------------------
@@ -715,7 +759,7 @@ LowMachEquationSystem::solve_and_update()
     continuityEqSys_->timerMisc_ += (timeB-timeA);
     isInit_ = false;
   }
-  
+
   // compute tvisc
   momentumEqSys_->tviscAlgDriver_->execute();
 
@@ -744,7 +788,7 @@ LowMachEquationSystem::solve_and_update()
 
     // compute velocity relative to mesh with new velocity
     realm_.compute_vrtm();
-
+    
     // continuity assemble, load_complete and solve
     continuityEqSys_->assemble_and_solve(continuityEqSys_->pTmp_);
 
@@ -817,6 +861,10 @@ LowMachEquationSystem::project_nodal_velocity()
   const double gamma1 = realm_.get_gamma1();
   const double projTimeScale = dt/gamma1;
 
+  // possible density scaling
+  const double densFac = realm_.solutionOptions_->balancedForce_ ? 1.0 : 0.0;
+  const double om_densFac = realm_.solutionOptions_->balancedForce_ ? 0.0 : 1.0;
+
   const int nDim = meta_data.spatial_dimension();
 
   // field that we need
@@ -877,9 +925,11 @@ LowMachEquationSystem::project_nodal_velocity()
     double * rho = stk::mesh::field_data(densityNp1, b);
     
     for ( stk::mesh::Bucket::size_type k = 0 ; k < length ; ++k ) {
-      
+
+      const double denom = densFac + om_densFac*rho[k];
+
       // Get scaling factor
-      const double fac = projTimeScale/rho[k];
+      const double fac = projTimeScale/denom;
       
       // projection step
       const size_t offSet = k*nDim;
@@ -907,6 +957,10 @@ LowMachEquationSystem::post_converged_work()
     surfaceForceAndMomentAlgDriver_->execute();
   }
   
+  if (NULL != sixDofSurfaceForceAndMomentAlgDriver_){
+    sixDofSurfaceForceAndMomentAlgDriver_->execute();
+  }
+
   // output mass closure
   continuityEqSys_->computeMdotAlgDriver_->provide_output();
 }
@@ -1113,7 +1167,6 @@ MomentumEquationSystem::register_interior_algorithm(
   }
 
   VectorFieldType &velocityNp1 = velocity_->field_of_state(stk::mesh::StateNP1);
-  GenericFieldType &dudxNone = dudx_->field_of_state(stk::mesh::StateNone);
 
   // non-solver; contribution to Gjui; allow for element-based shifted
   if ( !managePNG_ ) {
@@ -1122,10 +1175,10 @@ MomentumEquationSystem::register_interior_algorithm(
     if ( itgu == assembleNodalGradAlgDriver_->algMap_.end() ) {
       Algorithm *theAlg = NULL;
       if ( edgeNodalGradient_ && realm_.realmUsesEdges_ ) {
-        theAlg = new AssembleNodalGradUEdgeAlgorithm(realm_, part, &velocityNp1, &dudxNone);
+        theAlg = new AssembleNodalGradUEdgeAlgorithm(realm_, part, &velocityNp1, dudx_);
       }
       else {
-        theAlg = new AssembleNodalGradUElemAlgorithm(realm_, part, &velocityNp1, &dudxNone, edgeNodalGradient_);
+        theAlg = new AssembleNodalGradUElemAlgorithm(realm_, part, &velocityNp1, dudx_, edgeNodalGradient_);
       }
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
@@ -1160,44 +1213,14 @@ MomentumEquationSystem::register_interior_algorithm(
         for (size_t k = 0; k < mapNameVec.size(); ++k ) {
           std::string sourceName = mapNameVec[k];
           SupplementalAlgorithm *suppAlg = NULL;
-          if (sourceName == "momentum_time_derivative" ) {
-            suppAlg = new MomentumMassElemSuppAlgDep(realm_, false);
-          }
-          else if (sourceName == "lumped_momentum_time_derivative" ) {
-            suppAlg = new MomentumMassElemSuppAlgDep(realm_, true);
-          }
-          else if (sourceName == "SteadyTaylorVortex" ) {
-            suppAlg = new SteadyTaylorVortexMomentumSrcElemSuppAlg(realm_);
-          }
-          else if (sourceName == "VariableDensity" ) {
+          if (sourceName == "VariableDensity" ) {
             suppAlg = new VariableDensityMomentumSrcElemSuppAlg(realm_);
-          }
-          else if (sourceName == "NSO_2ND" ) {
-            suppAlg = new MomentumNSOElemSuppAlgDep(realm_, velocity_, dudx_, realm_.is_turbulent() ? evisc_ : visc_, 0.0, 0.0);
-          }
-          else if (sourceName == "NSO_2ND_ALT" ) {
-            suppAlg = new MomentumNSOElemSuppAlgDep(realm_, velocity_, dudx_, realm_.is_turbulent() ? evisc_ : visc_, 0.0, 1.0);
-          }
-          else if (sourceName == "NSO_4TH" ) {
-            suppAlg = new MomentumNSOElemSuppAlgDep(realm_, velocity_, dudx_, realm_.is_turbulent() ? evisc_ : visc_, 1.0, 0.0);
-          }
-          else if (sourceName == "NSO_4TH_ALT" ) {
-            suppAlg = new MomentumNSOElemSuppAlgDep(realm_, velocity_, dudx_, realm_.is_turbulent() ? evisc_ : visc_, 1.0, 1.0);
-          }
-          else if (sourceName == "NSO_2ND_KE" ) {
-            suppAlg = new MomentumNSOKeElemSuppAlgDep(realm_, velocity_, dudx_, 0.0);
-          }
-          else if (sourceName == "NSO_4TH_KE" ) {
-            suppAlg = new MomentumNSOKeElemSuppAlgDep(realm_, velocity_, dudx_, 1.0);
           }
           else if (sourceName == "NSO_2ND_GRAD" ) {
             suppAlg = new MomentumNSOGradElemSuppAlg(realm_, velocity_, dudx_, 0.0);
           }
           else if (sourceName == "NSO_4TH_GRAD" ) {
             suppAlg = new MomentumNSOGradElemSuppAlg(realm_, velocity_, dudx_, 1.0);
-          }
-          else if (sourceName == "buoyancy" ) {
-            suppAlg = new MomentumBuoyancySrcElemSuppAlgDep(realm_);
           }
           else {
             throw std::runtime_error("MomentumElemSrcTerms::Error Source term is not supported: " + sourceName);
@@ -1302,6 +1325,18 @@ MomentumEquationSystem::register_interior_algorithm(
         (partTopo, *this, activeKernels, "NSO_4TH_KE",
          realm_.bulk_data(), *realm_.solutionOptions_, velocity_, dudx_, 1.0, dataPreReqs);
 
+      build_topo_kernel_if_requested<MomentumGclElemKernel>
+        (partTopo, *this, activeKernels, "gcl",
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, false);
+      
+      build_topo_kernel_if_requested<MomentumGclElemKernel>
+        (partTopo, *this, activeKernels, "lumped_gcl",
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, true);
+
+      build_topo_kernel_if_requested<SteadyTaylorVortexMomentumSrcElemKernel>
+        (partTopo, *this, activeKernels, "SteadyTaylorVortex",
+         realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
+
       report_invalid_supp_alg_names();
       report_built_supp_alg_names();
     }
@@ -1364,9 +1399,6 @@ MomentumEquationSystem::register_interior_algorithm(
           else if ( sourceName == "gcl") {
             suppAlg = new MomentumGclSrcNodeSuppAlg(realm_);
           }
-          else if (sourceName == "SteadyTaylorVortex" ) {
-            suppAlg = new SteadyTaylorVortexMomentumSrcNodeSuppAlg(realm_);
-          }
           else if (sourceName == "VariableDensity" ) {
             suppAlg = new VariableDensityMomentumSrcNodeSuppAlg(realm_);
           }
@@ -1411,7 +1443,7 @@ MomentumEquationSystem::register_interior_algorithm(
     if ( it_tv == tviscAlgDriver_->algMap_.end() ) {
       Algorithm * theAlg = NULL;
       switch (realm_.solutionOptions_->turbulenceModel_ ) {
-        case KSGS: case DKSGS:
+        case KSGS: case LRKSGS: case DKSGS:
           theAlg = new TurbViscKsgsAlgorithm(realm_, part);
           break;
         case SMAGORINSKY:
@@ -1456,7 +1488,6 @@ MomentumEquationSystem::register_inflow_bc(
 
   // velocity np1
   VectorFieldType &velocityNp1 = velocity_->field_of_state(stk::mesh::StateNP1);
-  GenericFieldType &dudxNone = dudx_->field_of_state(stk::mesh::StateNone);
 
   stk::mesh::MetaData &meta_data = realm_.meta_data();
   const unsigned nDim = meta_data.spatial_dimension();
@@ -1557,7 +1588,7 @@ MomentumEquationSystem::register_inflow_bc(
       = assembleNodalGradAlgDriver_->algMap_.find(algType);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
       Algorithm *theAlg
-        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, theBcField, &dudxNone, edgeNodalGradient_);
+        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, theBcField, dudx_, edgeNodalGradient_);
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -1620,7 +1651,6 @@ MomentumEquationSystem::register_open_bc(
   bcDataAlg_.push_back(auxAlg);
 
   VectorFieldType &velocityNp1 = velocity_->field_of_state(stk::mesh::StateNP1);
-  GenericFieldType &dudxNone = dudx_->field_of_state(stk::mesh::StateNone);
 
   // non-solver; contribution to Gjui; allow for element-based shifted
   if ( !managePNG_ ) {
@@ -1628,7 +1658,7 @@ MomentumEquationSystem::register_open_bc(
       = assembleNodalGradAlgDriver_->algMap_.find(algType);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
       Algorithm *theAlg
-        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, &velocityNp1, &dudxNone, edgeNodalGradient_);
+        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, &velocityNp1, dudx_, edgeNodalGradient_);
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -1700,7 +1730,6 @@ MomentumEquationSystem::register_wall_bc(
 
   // np1 velocity
   VectorFieldType &velocityNp1 = velocity_->field_of_state(stk::mesh::StateNP1);
-  GenericFieldType &dudxNone = dudx_->field_of_state(stk::mesh::StateNone);
 
   stk::mesh::MetaData &meta_data = realm_.meta_data();
   const unsigned nDim = meta_data.spatial_dimension();
@@ -1739,8 +1768,12 @@ MomentumEquationSystem::register_wall_bc(
         std::vector<std::string> theStringParams  = get_bc_function_string_params(userData, velocityName);
      	theAuxFunc = new WindEnergyAuxFunction(0,nDim, theStringParams, realm_);
       }
+      else if ( fcnName == "mesh_motion" ) {
+        std::vector<std::string> theStringParams  = get_bc_function_string_params(userData, velocityName);
+        theAuxFunc = new MeshMotionAuxFunction(0,nDim, theStringParams, realm_);
+      }
       else {
-        throw std::runtime_error("Only wind_energy and tornado user functions supported");
+        throw std::runtime_error("Only wind_energy, mesh_motion, and tornado user functions supported");
       }
     }
   }
@@ -1782,7 +1815,7 @@ MomentumEquationSystem::register_wall_bc(
       = assembleNodalGradAlgDriver_->algMap_.find(algTypePNG);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
       Algorithm *theAlg
-        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, theBcField, &dudxNone, edgeNodalGradient_);
+        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, theBcField, dudx_, edgeNodalGradient_);
       assembleNodalGradAlgDriver_->algMap_[algTypePNG] = theAlg;
     }
     else {
@@ -1939,7 +1972,6 @@ MomentumEquationSystem::register_symmetry_bc(
   const AlgorithmType algType = SYMMETRY;
 
   VectorFieldType &velocityNp1 = velocity_->field_of_state(stk::mesh::StateNP1);
-  GenericFieldType &dudxNone = dudx_->field_of_state(stk::mesh::StateNone);
 
   // non-solver; contribution to Gjui; allow for element-based shifted
   if ( !managePNG_ ) {
@@ -1947,7 +1979,7 @@ MomentumEquationSystem::register_symmetry_bc(
       = assembleNodalGradAlgDriver_->algMap_.find(algType);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
       Algorithm *theAlg
-        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, &velocityNp1, &dudxNone, edgeNodalGradient_);
+        = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, &velocityNp1, dudx_, edgeNodalGradient_);
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -2015,7 +2047,6 @@ MomentumEquationSystem::register_non_conformal_bc(
   const AlgorithmType algType = NON_CONFORMAL;
 
   VectorFieldType &velocityNp1 = velocity_->field_of_state(stk::mesh::StateNP1);
-  GenericFieldType &dudxNone = dudx_->field_of_state(stk::mesh::StateNone);
 
   stk::mesh::MetaData &meta_data = realm_.meta_data();
 
@@ -2035,7 +2066,7 @@ MomentumEquationSystem::register_non_conformal_bc(
         = assembleNodalGradAlgDriver_->algMap_.find(algType);
       if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
         Algorithm *theAlg
-          = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, &velocityNp1, &dudxNone, edgeNodalGradient_);
+          = new AssembleNodalGradUBoundaryAlgorithm(realm_, part, &velocityNp1, dudx_, edgeNodalGradient_);
         assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
       }
       else {
@@ -2048,7 +2079,7 @@ MomentumEquationSystem::register_non_conformal_bc(
         = assembleNodalGradAlgDriver_->algMap_.find(algType);
       if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
         AssembleNodalGradUNonConformalAlgorithm *theAlg 
-          = new AssembleNodalGradUNonConformalAlgorithm(realm_, part, &velocityNp1, &dudxNone);
+          = new AssembleNodalGradUNonConformalAlgorithm(realm_, part, &velocityNp1, dudx_);
         assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
       }
       else {
@@ -2079,17 +2110,27 @@ MomentumEquationSystem::register_overset_bc()
 {
   create_constraint_algorithm(velocity_);
 
+  auto &&metaData = realm_.meta_data();
+  auto &&dualNodalVolume_ = metaData.get_field<ScalarFieldType>(stk::topology::NODE_RANK, "dual_nodal_volume");
+
   int nDim = realm_.meta_data().spatial_dimension();
   UpdateOversetFringeAlgorithmDriver* theAlg = new UpdateOversetFringeAlgorithmDriver(realm_);
   // Perform fringe updates before all equation system solves
   equationSystems_.preIterAlgDriver_.push_back(theAlg);
   theAlg->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(velocity_,1,nDim)));
-  
+  theAlg->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(dualNodalVolume_,1,1)));
+
+
   if ( realm_.has_mesh_motion() ) {
     UpdateOversetFringeAlgorithmDriver* theAlgPost = new UpdateOversetFringeAlgorithmDriver(realm_,false);
     // Perform fringe updates after all equation system solves (ideally on the post_time_step)
     equationSystems_.postIterAlgDriver_.push_back(theAlgPost);
     theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(velocity_,1,nDim)));
+    if (realm_.number_of_states()>2)
+    {
+      auto &&velocityN = velocity_->field_of_state(stk::mesh::StateN);
+      theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(&velocityN,1,nDim)));
+    }
   }
 }
 
@@ -2276,7 +2317,7 @@ ContinuityEquationSystem::ContinuityEquationSystem(
     massFlowRate_(NULL),
     coordinates_(NULL),
     pTmp_(NULL),
-    assembleNodalGradAlgDriver_(new AssembleNodalGradAlgorithmDriver(realm_, "pressure", "dpdx")),
+    assembleNodalGradAlgDriver_(new AssembleNodalGradAlgorithmDriver(realm_, "pressure", "dpdx", "png_area_weight", realm_.solutionOptions_->balancedForce_)),
     computeMdotAlgDriver_(new ComputeMdotAlgorithmDriver(realm_)),
     projectedNodalGradEqs_(NULL)
 {
@@ -2303,6 +2344,8 @@ ContinuityEquationSystem::ContinuityEquationSystem(
   
   // create projected nodal gradient equation system
   if ( managePNG_ ) {
+    if ( realm_.solutionOptions_->balancedForce_ )
+      throw std::runtime_error("ContinuityEquationSystem::Cannot activate PNG and balanced_force_pressure_png");
     manage_projected_nodal_gradient(eqSystems);
   }
 }
@@ -2335,6 +2378,13 @@ ContinuityEquationSystem::register_nodal_fields(
 
   dpdx_ =  &(meta_data.declare_field<VectorFieldType>(stk::topology::NODE_RANK, "dpdx"));
   stk::mesh::put_field_on_mesh(*dpdx_, *part, nDim, nullptr);
+  
+  // VOF scheme (balanced force) requires special projected nodal gradient that is area-weighted
+  if ( realm_.solutionOptions_->balancedForce_ ) {
+    VectorFieldType *areaWeight 
+      =  &(meta_data.declare_field<VectorFieldType>(stk::topology::NODE_RANK, "png_area_weight"));
+    stk::mesh::put_field_on_mesh(*areaWeight, *part, nDim, nullptr);
+  }
 
   // delta solution for linear solver; share delta with other split systems
   pTmp_ =  &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "pTmp"));
@@ -2342,7 +2392,6 @@ ContinuityEquationSystem::register_nodal_fields(
 
   coordinates_ =  &(meta_data.declare_field<VectorFieldType>(stk::topology::NODE_RANK, "coordinates"));
   stk::mesh::put_field_on_mesh(*coordinates_, *part, nDim, nullptr);
-
 }
 
 //--------------------------------------------------------------------------
@@ -2379,9 +2428,6 @@ ContinuityEquationSystem::register_interior_algorithm(
   // non-solver, dpdx
   const AlgorithmType algType = INTERIOR;
 
-  ScalarFieldType &pressureNone = pressure_->field_of_state(stk::mesh::StateNone);
-  VectorFieldType &dpdxNone = dpdx_->field_of_state(stk::mesh::StateNone);
-
   // non-solver; contribution to Gjp; allow for element-based shifted
   if ( !managePNG_ ) {
     std::map<AlgorithmType, Algorithm *>::iterator it
@@ -2389,10 +2435,14 @@ ContinuityEquationSystem::register_interior_algorithm(
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
       Algorithm *theAlg = NULL;
       if ( !elementContinuityEqs_ && edgeNodalGradient_ ) {
-        theAlg = new AssembleNodalGradEdgeAlgorithm(realm_, part, &pressureNone, &dpdxNone);
+        theAlg = new AssembleNodalGradEdgeAlgorithm(realm_, part, pressure_, dpdx_);
       }
       else {
-        theAlg = new AssembleNodalGradElemAlgorithm(realm_, part, &pressureNone, &dpdxNone, edgeNodalGradient_);
+        if ( realm_.solutionOptions_->balancedForce_ ) {
+          theAlg = new AssembleNodalGradPAWElemAlgorithm(realm_, part, pressure_, dpdx_);
+        }
+        else
+          theAlg = new AssembleNodalGradElemAlgorithm(realm_, part, pressure_, dpdx_, edgeNodalGradient_);
       }
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
@@ -2437,8 +2487,13 @@ ContinuityEquationSystem::register_interior_algorithm(
     std::map<AlgorithmType, Algorithm *>::iterator itc =
       computeMdotAlgDriver_->algMap_.find(algType);
     if ( itc == computeMdotAlgDriver_->algMap_.end() ) {
-      ComputeMdotElemAlgorithm *theAlg
-        = new ComputeMdotElemAlgorithm(realm_, part, realm_.realmUsesEdges_);
+      Algorithm *theAlg = NULL;
+      if ( realm_.solutionOptions_->balancedForce_) {
+        theAlg = new ComputeMdotVofElemAlgorithm(realm_, part, *realm_.solutionOptions_);
+      }
+      else {
+        theAlg = new ComputeMdotElemAlgorithm(realm_, part, realm_.realmUsesEdges_);
+      }
       computeMdotAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -2467,17 +2522,8 @@ ContinuityEquationSystem::register_interior_algorithm(
           for (size_t k = 0; k < mapNameVec.size(); ++k ) {
             std::string sourceName = mapNameVec[k];
             SupplementalAlgorithm *suppAlg = NULL;
-            if (sourceName == "SteadyTaylorVortex" ) {
-              suppAlg = new SteadyTaylorVortexContinuitySrcElemSuppAlg(realm_);
-            }
-            else if ( sourceName == "VariableDensity" ) {
+            if ( sourceName == "VariableDensity" ) {
               suppAlg = new VariableDensityContinuitySrcElemSuppAlg(realm_);
-            }
-            else if (sourceName == "density_time_derivative" ) {
-              suppAlg = new ContinuityMassElemSuppAlgDep(realm_, false);
-            }
-            else if (sourceName == "lumped_density_time_derivative" ) {
-              suppAlg = new ContinuityMassElemSuppAlgDep(realm_, true);
             }
             else {
               throw std::runtime_error("ContinuityElemSrcTerms::Error Source term is not supported: " + sourceName);
@@ -2514,8 +2560,24 @@ ContinuityEquationSystem::register_interior_algorithm(
           (partTopo, *this, activeKernels, "lumped_density_time_derivative",
            realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, true);
 
+        build_topo_kernel_if_requested<ContinuityGclElemKernel>
+          (partTopo, *this, activeKernels, "gcl",
+           realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, false);
+
+        build_topo_kernel_if_requested<ContinuityGclElemKernel>
+          (partTopo, *this, activeKernels, "lumped_gcl",
+           realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs, true);
+
+        build_topo_kernel_if_requested<SteadyTaylorVortexContinuitySrcElemKernel>
+          (partTopo, *this, activeKernels, "SteadyTaylorVortex",
+           realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
+
         build_topo_kernel_if_requested<ContinuityAdvElemKernel>
           (partTopo, *this, activeKernels, "advection",
+           realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
+
+        build_topo_kernel_if_requested<ContinuityVofAdvElemKernel>
+          (partTopo, *this, activeKernels, "vof_advection",
            realm_.bulk_data(), *realm_.solutionOptions_, dataPreReqs);
 
         report_invalid_supp_alg_names();
@@ -2590,9 +2652,6 @@ ContinuityEquationSystem::register_inflow_bc(
 
   // algorithm type
   const AlgorithmType algType = INFLOW;
-
-  ScalarFieldType &pressureNone = pressure_->field_of_state(stk::mesh::StateNone);
-  VectorFieldType &dpdxNone = dpdx_->field_of_state(stk::mesh::StateNone);
 
   stk::mesh::MetaData &meta_data = realm_.meta_data();
   const unsigned nDim = meta_data.spatial_dimension();
@@ -2683,8 +2742,13 @@ ContinuityEquationSystem::register_inflow_bc(
     std::map<AlgorithmType, Algorithm *>::iterator it
       = assembleNodalGradAlgDriver_->algMap_.find(algType);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
-      Algorithm *theAlg 
-        = new AssembleNodalGradBoundaryAlgorithm(realm_, part, &pressureNone, &dpdxNone, edgeNodalGradient_);
+      Algorithm *theAlg = nullptr;
+      if ( realm_.solutionOptions_->balancedForce_ ) {
+        theAlg = new AssembleNodalGradPAWBoundaryAlgorithm(realm_, part, pressure_, dpdx_, "pressure");
+      }
+      else {
+        theAlg = new AssembleNodalGradBoundaryAlgorithm(realm_, part, pressure_, dpdx_, edgeNodalGradient_);
+      }
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -2759,18 +2823,20 @@ ContinuityEquationSystem::register_open_bc(
   stk::mesh::MetaData &meta_data = realm_.meta_data();
   ScalarFieldType *pressureBC 
     = &(meta_data.declare_field<ScalarFieldType>(stk::topology::NODE_RANK, "pressure_bc"));
-    stk::mesh::put_field_on_mesh(*pressureBC, *part, nullptr);
-
-  VectorFieldType &dpdxNone = dpdx_->field_of_state(stk::mesh::StateNone);
+  stk::mesh::put_field_on_mesh(*pressureBC, *part, nullptr);
 
   // non-solver; contribution to Gjp; allow for element-based shifted
   if ( !managePNG_ ) {
     std::map<AlgorithmType, Algorithm *>::iterator it
       = assembleNodalGradAlgDriver_->algMap_.find(algType);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
-      Algorithm *theAlg 
-        = new AssembleNodalGradPBoundaryAlgorithm(realm_, part, pressureBC == NULL ? pressure_ : pressureBC, 
-                                                  &dpdxNone, edgeNodalGradient_);
+      Algorithm *theAlg = nullptr;
+      if ( realm_.solutionOptions_->balancedForce_ ) {
+        theAlg = new AssembleNodalGradPAWBoundaryAlgorithm(realm_, part, pressure_, dpdx_, "pressure_bc", true);
+      }
+      else {
+        theAlg = new AssembleNodalGradPBoundaryAlgorithm(realm_, part, pressureBC, dpdx_, edgeNodalGradient_);
+      }
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -2810,8 +2876,13 @@ ContinuityEquationSystem::register_open_bc(
     std::map<AlgorithmType, Algorithm *>::iterator itm =
       computeMdotAlgDriver_->algMap_.find(algType);
     if ( itm == computeMdotAlgDriver_->algMap_.end() ) {
-      ComputeMdotElemOpenAlgorithm *theAlg
-        = new ComputeMdotElemOpenAlgorithm(realm_, part);
+      Algorithm *theAlg = NULL;
+      if ( realm_.solutionOptions_->balancedForce_ ) {
+        theAlg = new ComputeMdotVofElemOpenAlgorithm(realm_, part, *realm_.solutionOptions_);
+      }
+      else {
+        theAlg = new ComputeMdotElemOpenAlgorithm(realm_, part);
+      }
       computeMdotAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -2835,11 +2906,18 @@ ContinuityEquationSystem::register_open_bc(
       
       if (solverAlgWasBuilt) {
         
-        build_face_elem_topo_kernel_automatic<ContinuityOpenElemKernel>
-          (partTopo, elemTopo, *this, activeKernels, "continuity_open",
-           realm_.meta_data(), *realm_.solutionOptions_,
-           faceElemSolverAlg->faceDataNeeded_, faceElemSolverAlg->elemDataNeeded_);
-        
+        if ( realm_.solutionOptions_->balancedForce_ ) {
+          build_face_elem_topo_kernel_automatic<ContinuityVofOpenElemKernel>
+            (partTopo, elemTopo, *this, activeKernels, "continuity_open_vof",
+             realm_.meta_data(), *realm_.solutionOptions_,
+             faceElemSolverAlg->faceDataNeeded_, faceElemSolverAlg->elemDataNeeded_);
+        }
+        else {
+          build_face_elem_topo_kernel_automatic<ContinuityOpenElemKernel>
+            (partTopo, elemTopo, *this, activeKernels, "continuity_open",
+             realm_.meta_data(), *realm_.solutionOptions_,
+             faceElemSolverAlg->faceDataNeeded_, faceElemSolverAlg->elemDataNeeded_);
+        }
       }
     }
     else {      
@@ -2871,16 +2949,18 @@ ContinuityEquationSystem::register_wall_bc(
   // algorithm type
   const AlgorithmType algType = WALL;
 
-  ScalarFieldType &pressureNone = pressure_->field_of_state(stk::mesh::StateNone);
-  VectorFieldType &dpdxNone = dpdx_->field_of_state(stk::mesh::StateNone);
-
   // non-solver; contribution to Gjp; allow for element-based shifted
   if ( !managePNG_ ) {
     std::map<AlgorithmType, Algorithm *>::iterator it
       = assembleNodalGradAlgDriver_->algMap_.find(algType);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
-      Algorithm *theAlg 
-        = new AssembleNodalGradBoundaryAlgorithm(realm_, part, &pressureNone, &dpdxNone, edgeNodalGradient_);
+      Algorithm *theAlg = nullptr;
+      if ( realm_.solutionOptions_->balancedForce_ ) {
+        theAlg = new AssembleNodalGradPAWBoundaryAlgorithm(realm_, part, pressure_, dpdx_, "pressure");
+      }
+      else {
+        theAlg = new AssembleNodalGradBoundaryAlgorithm(realm_, part, pressure_, dpdx_, edgeNodalGradient_);
+      }
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -2902,15 +2982,17 @@ ContinuityEquationSystem::register_symmetry_bc(
   // algorithm type
   const AlgorithmType algType = SYMMETRY;
 
-  ScalarFieldType &pressureNone = pressure_->field_of_state(stk::mesh::StateNone);
-  VectorFieldType &dpdxNone = dpdx_->field_of_state(stk::mesh::StateNone);
-
   // non-solver; contribution to Gjp; allow for element-based shifted
   if ( !managePNG_ ) {
     std::map<AlgorithmType, Algorithm *>::iterator it = assembleNodalGradAlgDriver_->algMap_.find(algType);
     if ( it == assembleNodalGradAlgDriver_->algMap_.end() ) {
-      Algorithm *theAlg 
-        = new AssembleNodalGradBoundaryAlgorithm(realm_, part, &pressureNone, &dpdxNone, edgeNodalGradient_);
+      Algorithm *theAlg = nullptr;
+      if ( realm_.solutionOptions_->balancedForce_ ) {
+        theAlg = new AssembleNodalGradPAWBoundaryAlgorithm(realm_, part, pressure_, dpdx_, "pressure");
+      }
+      else {
+        theAlg = new AssembleNodalGradBoundaryAlgorithm(realm_, part, pressure_, dpdx_, edgeNodalGradient_);
+      }
       assembleNodalGradAlgDriver_->algMap_[algType] = theAlg;
     }
     else {
@@ -2939,6 +3021,9 @@ ContinuityEquationSystem::register_non_conformal_bc(
   GenericFieldType *mdotBip =
     &(meta_data.declare_field<GenericFieldType>(sideRank, "nc_mass_flow_rate"));
   stk::mesh::put_field_on_mesh(*mdotBip, *part, numScsBip, nullptr);
+
+  if ( realm_.solutionOptions_->balancedForce_ )
+    throw std::runtime_error("ContinuityEquationSystem::non_conformal is not ready for production");
 
   // non-solver; contribution to Gjp; DG algorithm decides on locations for integration points
   if ( !managePNG_ ) {
@@ -3008,6 +3093,17 @@ ContinuityEquationSystem::register_overset_bc()
   // manage pressure; variable density requires a pre-timestep evaluation of independent variables
   theAlg->fields_.push_back(
     std::unique_ptr<OversetFieldData>(new OversetFieldData(pressure_,1,1)));
+
+  if ( realm_.has_mesh_motion() ) {
+
+    const int nDim = realm_.meta_data().spatial_dimension();
+
+    UpdateOversetFringeAlgorithmDriver* theAlgPost = new UpdateOversetFringeAlgorithmDriver(realm_,false);
+    // Perform fringe updates after all equation system solves (ideally on the post_time_step)
+    equationSystems_.postIterAlgDriver_.push_back(theAlgPost);
+    theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(dpdx_,1,nDim)));
+    theAlgPost->fields_.push_back(std::unique_ptr<OversetFieldData>(new OversetFieldData(pressure_,1,1)));
+  }
 }
 
 //--------------------------------------------------------------------------
@@ -3116,6 +3212,12 @@ ContinuityEquationSystem::register_initial_condition_fcn(
     }
     else if ( fcnName == "kovasznay" ) {
       theAuxFunc = new KovasznayPressureAuxFunction();
+    }
+    else if ( fcnName == "linear" ) {
+      // extract the params
+      auto iterParams = theParams.find(dofName);
+      std::vector<double> fcnParams = (iterParams != theParams.end()) ? (*iterParams).second : std::vector<double>();
+      theAuxFunc = new LinearAuxFunction(fcnParams,0,1);
     }
     else {
       throw std::runtime_error("ContinuityEquationSystem::register_initial_condition_fcn: limited functions supported");

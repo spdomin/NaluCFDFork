@@ -151,19 +151,10 @@ namespace sierra
         {
           oversetBC.oversetConnectivityType_ =
               OversetBoundaryConditionData::NALU_STK;
-        } else if (ogaName == "tioga")
-        {
-#ifdef NALU_USES_TIOGA
-          oversetBC.oversetConnectivityType_ = OversetBoundaryConditionData::TPL_TIOGA;
-#else
-          throw std::runtime_error(
-            "TIOGA overset connectivity requested in input file. "
-              "However, the optional TPL was not included during compile time.");
-#endif
         } else
         {
           throw std::runtime_error(
-            "Nalu supports two overset connectivity packages: 'nalu_stk' and 'tioga'. "
+            "Nalu supports one overset connectivity package: 'nalu_stk'. "
                 "Value in input file: " + ogaName);
         }
       }
@@ -175,16 +166,6 @@ namespace sierra
         case OversetBoundaryConditionData::NALU_STK:
           oversetBC.userData_ = oversetUserData.as<OversetUserData>();
           break;
-
-        case OversetBoundaryConditionData::TPL_TIOGA:
-#ifdef NALU_USES_TIOGA
-          oversetBC.userData_.oversetBlocks_ = oversetUserData;
-#else
-          throw std::runtime_error(
-            "TIOGA TPL support not enabled during compilation phase.");
-#endif
-          break;
-
         case OversetBoundaryConditionData::OVERSET_NONE:
         default:
           throw std::runtime_error(
@@ -642,6 +623,19 @@ namespace YAML
     return true;
   }
 
+  bool convert<sierra::nalu::VolumeOfFluid>::decode(const Node& node,
+    sierra::nalu::VolumeOfFluid& vof)
+  {
+    if (!node.IsScalar())
+    {
+      return false;
+    }
+
+    vof.vof_ = node.as<double>();
+
+    return true;
+  }
+
   bool convert<sierra::nalu::Emissivity>::decode(const Node& node,
     sierra::nalu::Emissivity& emiss)
   {
@@ -807,6 +801,13 @@ namespace YAML
           sierra::nalu::MassFraction>();
       wallData.bcDataSpecifiedMap_["mass_fraction"] = true;
       wallData.bcDataTypeMap_["mass_fraction"] = sierra::nalu::CONSTANT_UD;
+    }
+    if (node["volume_of_fluid"])
+    {
+      wallData.vof_ = node["volume_of_fluid"].as<
+        sierra::nalu::VolumeOfFluid>();
+      wallData.bcDataSpecifiedMap_["volume_of_fluid"] = true;
+      wallData.bcDataTypeMap_["volume_of_fluid"] = sierra::nalu::CONSTANT_UD;
     }
     if (node["emissivity"])
     {
@@ -992,6 +993,12 @@ namespace YAML
           sierra::nalu::MassFraction>();
       inflowData.massFractionSpec_ = true;
     }
+    if (node["volume_of_fluid"])
+    {
+      inflowData.vof_ = node["volume_of_fluid"].as<
+          sierra::nalu::VolumeOfFluid>();
+      inflowData.vofSpec_ = true;
+    }
     if (node["temperature"])
     {
       inflowData.temperature_ =
@@ -1084,6 +1091,13 @@ namespace YAML
       openData.temperature_ =
           node["temperature"].as<sierra::nalu::Temperature>();
       openData.tempSpec_ = true;
+    }
+
+    if (node["volume_of_fluid"])
+    {
+      openData.vof_ = node["volume_of_fluid"].as<
+          sierra::nalu::VolumeOfFluid>();
+      openData.vofSpec_ = true;
     }
     
     if (node["use_total_pressure"])
@@ -1180,6 +1194,16 @@ namespace YAML
     {
       oversetData.detailedOutput_ = node["detailed_output"].as<bool>();
     }
+
+    if (node["cutting_shape"])
+    {
+      oversetData.cuttingShape_ = node["cutting_shape"].as<std::string>();
+    }
+
+    if (node["cutting_shape_axial_dir"])
+    {
+     oversetData.cuttingAxis_ = node["cutting_shape_axial_dir"].as<int>();
+    }    
 
     return true;
   }

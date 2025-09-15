@@ -73,6 +73,7 @@ SurfaceForceAndMomentAlgorithm::SurfaceForceAndMomentAlgorithm(
   pressure_ = meta_data.get_field<double>(stk::topology::NODE_RANK, "pressure");
   pressureForce_ = meta_data.get_field<double>(stk::topology::NODE_RANK, "pressure_force");
   tauWall_ = meta_data.get_field<double>(stk::topology::NODE_RANK, "tau_wall");
+  vecTauWall_ = meta_data.get_field<double>(stk::topology::NODE_RANK, "vector_tau_wall");
   yplus_ = meta_data.get_field<double>(stk::topology::NODE_RANK, "yplus");
   density_ = meta_data.get_field<double>(stk::topology::NODE_RANK, "density");
   // extract viscosity name
@@ -261,6 +262,7 @@ SurfaceForceAndMomentAlgorithm::execute()
         const double * coord = stk::mesh::field_data(*coordinates_, node );
         const double *duidxj = stk::mesh::field_data(*dudx_, node );
         double *pressureForce = stk::mesh::field_data(*pressureForce_, node );
+        double *vecTauWall = stk::mesh::field_data(*vecTauWall_, node );
         double *tauWall = stk::mesh::field_data(*tauWall_, node );
         double *yplus = stk::mesh::field_data(*yplus_, node );
         const double assembledArea = *stk::mesh::field_data(*assembledArea_, node );
@@ -299,6 +301,9 @@ SurfaceForceAndMomentAlgorithm::execute()
           // accumulate viscous force and set tau for component i
           ws_v_force[i] += dflux;
           ws_tau[i] = tauijNj;
+
+          // accumulate ip tau_wall
+          vecTauWall[i] += tauijNj*aMag/assembledArea;
         }
         
         // compute total force and tangential tau

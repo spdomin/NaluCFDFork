@@ -73,17 +73,21 @@ SurfaceForceAndMomentAlgorithmDriver::zero_fields()
   ScalarFieldType *assembledArea = meta_data.get_field<double>(stk::topology::NODE_RANK, "assembled_area_force_moment");
   ScalarFieldType *assembledAreaWF = meta_data.get_field<double>(stk::topology::NODE_RANK, "assembled_area_force_moment_wf");
   ScalarFieldType *assembledAreaWFP = meta_data.get_field<double>(stk::topology::NODE_RANK, "assembled_area_force_moment_wfp");
+  // only resolved tau_wall is provided now..
+  VectorFieldType *vecTauWall = meta_data.get_field<double>(stk::topology::NODE_RANK, "vector_tau_wall");
 
   // zero fields
   field_fill( meta_data, bulk_data, 0.0, *pressureForce, realm_.get_activate_aura());
-  field_fill( meta_data, bulk_data, 0.0, *tauWall, realm_.get_activate_aura());
   field_fill( meta_data, bulk_data, 0.0, *yplus, realm_.get_activate_aura());
+  field_fill( meta_data, bulk_data, 0.0, *tauWall, realm_.get_activate_aura());
   if ( NULL != assembledArea ) 
     field_fill( meta_data, bulk_data, 0.0, *assembledArea, realm_.get_activate_aura());
   if ( NULL != assembledAreaWF ) 
     field_fill( meta_data, bulk_data, 0.0, *assembledAreaWF, realm_.get_activate_aura());
   if ( NULL != assembledAreaWFP ) 
     field_fill( meta_data, bulk_data, 0.0, *assembledAreaWFP, realm_.get_activate_aura());
+  if ( NULL != vecTauWall )
+    field_fill( meta_data, bulk_data, 0.0, *vecTauWall, realm_.get_activate_aura());
 }
 
 //--------------------------------------------------------------------------
@@ -101,9 +105,12 @@ SurfaceForceAndMomentAlgorithmDriver::parallel_assemble_fields()
   VectorFieldType *pressureForce = meta_data.get_field<double>(stk::topology::NODE_RANK, "pressure_force");
   ScalarFieldType *tauWall = meta_data.get_field<double>(stk::topology::NODE_RANK, "tau_wall");
   ScalarFieldType *yplus = meta_data.get_field<double>(stk::topology::NODE_RANK, "yplus");
+  VectorFieldType *vecTauWall = meta_data.get_field<double>(stk::topology::NODE_RANK, "vector_tau_wall");
 
   // parallel assemble
   stk::mesh::parallel_sum(bulk_data, {pressureForce, tauWall, yplus});
+  if ( NULL != vecTauWall )
+    stk::mesh::parallel_sum(bulk_data, {vecTauWall});
 
   // periodic assemble
   if ( realm_.hasPeriodic_) {
@@ -111,6 +118,8 @@ SurfaceForceAndMomentAlgorithmDriver::parallel_assemble_fields()
     realm_.periodic_field_update(pressureForce, nDim, bypassFieldCheck);
     realm_.periodic_field_update(tauWall, 1, bypassFieldCheck);
     realm_.periodic_field_update(yplus, 1, bypassFieldCheck);
+    if ( NULL != vecTauWall )
+      realm_.periodic_field_update(vecTauWall, nDim, bypassFieldCheck);
   }
 
 }
@@ -150,7 +159,6 @@ SurfaceForceAndMomentAlgorithmDriver::parallel_assemble_area()
     if ( NULL != assembledAreaWFP )
       realm_.periodic_field_update(assembledAreaWFP, 1, bypassFieldCheck);
   }
-
 }
 
 //--------------------------------------------------------------------------
@@ -183,7 +191,7 @@ SurfaceForceAndMomentAlgorithmDriver::execute()
   
   // parallel assembly
   parallel_assemble_fields();
-
+  
 }
 
 

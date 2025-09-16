@@ -565,18 +565,17 @@ LowMachEquationSystem::register_surface_six_dof_algorithm(
   stk::io::set_field_output_type(*pressureForce, stk::io::FieldOutputType::VECTOR_3D);
   ScalarFieldType *tauWall =  &(meta_data.declare_field<double>(stk::topology::NODE_RANK, "tau_wall"));
   stk::mesh::put_field_on_mesh(*tauWall, stk::mesh::selectUnion(partVector), nullptr);
-  ScalarFieldType *yplus =  &(meta_data.declare_field<double>(stk::topology::NODE_RANK, "yplus"));
-  stk::mesh::put_field_on_mesh(*yplus, stk::mesh::selectUnion(partVector), nullptr);
-
   VectorFieldType *vecTauWall =  &(meta_data.declare_field<double>(stk::topology::NODE_RANK, "vector_tau_wall"));
   stk::mesh::put_field_on_mesh(*vecTauWall, stk::mesh::selectUnion(partVector), meta_data.spatial_dimension(), nullptr);
   stk::io::set_field_output_type(*vecTauWall, stk::io::FieldOutputType::VECTOR_3D);
+  ScalarFieldType *yplus =  &(meta_data.declare_field<double>(stk::topology::NODE_RANK, "yplus"));
+  stk::mesh::put_field_on_mesh(*yplus, stk::mesh::selectUnion(partVector), nullptr);
 
   // force output for these variables
   realm_.augment_output_variable_list(pressureForce->name());
   realm_.augment_output_variable_list(tauWall->name());
-  realm_.augment_output_variable_list(yplus->name());
   realm_.augment_output_variable_list(vecTauWall->name());
+  realm_.augment_output_variable_list(yplus->name());
   
   // inform the user
   NaluEnv::self().naluOutputP0() 
@@ -610,12 +609,16 @@ LowMachEquationSystem::register_surface_pp_algorithm(
   stk::io::set_field_output_type(*pressureForce, stk::io::FieldOutputType::VECTOR_3D);
   ScalarFieldType *tauWall =  &(meta_data.declare_field<double>(stk::topology::NODE_RANK, "tau_wall"));
   stk::mesh::put_field_on_mesh(*tauWall, stk::mesh::selectUnion(partVector), nullptr);
+  VectorFieldType *vecTauWall =  &(meta_data.declare_field<double>(stk::topology::NODE_RANK, "vector_tau_wall"));
+  stk::mesh::put_field_on_mesh(*vecTauWall, stk::mesh::selectUnion(partVector), meta_data.spatial_dimension(), nullptr);
+  stk::io::set_field_output_type(*vecTauWall, stk::io::FieldOutputType::VECTOR_3D);
   ScalarFieldType *yplus =  &(meta_data.declare_field<double>(stk::topology::NODE_RANK, "yplus"));
   stk::mesh::put_field_on_mesh(*yplus, stk::mesh::selectUnion(partVector), nullptr);
- 
+
   // force output for these variables
   realm_.augment_output_variable_list(pressureForce->name());
   realm_.augment_output_variable_list(tauWall->name());
+  realm_.augment_output_variable_list(vecTauWall->name());
   realm_.augment_output_variable_list(yplus->name());
 
   // extract frequency
